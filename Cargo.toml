@@ -14,6 +14,11 @@ readme = "README.md"
 keywords = ["cryptography", "pkcs11", "hsm", "aws-lc", "fips"]
 categories = ["cryptography", "authentication"]
 rust-version = "1.88"
+exclude = [".github/", ".cargo/", ".gitignore"]
+
+[package.metadata.docs.rs]
+# Document the optional algorithm families on docs.rs (RustCrypto provider).
+features = ["legacy", "post-quantum", "tls-ring"]
 
 [features]
 default = ["rustcrypto", "pkcs11"]
@@ -71,7 +76,7 @@ zeroize = "1.7"
 # Provider-neutral PKCS#8 structure parsing (format only, no primitives).
 pkcs8 = { version = "0.10", default-features = false, features = ["alloc"] }
 crypto-bigint = { version = "0.7", features = ["alloc", "zeroize"], optional = true }
-aws-lc-rs = { version = "1.17", optional = true }
+aws-lc-rs = { version = "1.18", optional = true }
 # 0.23.45 is the first release with the RUSTSEC-2026-0285 fix.
 rustls = { version = "0.23.45", default-features = false, features = ["std", "tls12"], optional = true }
 
