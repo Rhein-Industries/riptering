@@ -437,7 +437,7 @@ fn unsupported_operations_are_reported_before_key_parsing() {
 }
 
 #[test]
-fn ecdsa_sign_and_verify_capabilities_are_symmetric() {
+fn ecdsa_signing_capabilities_are_also_verifiable() {
     for curve in [EcCurve::P256, EcCurve::P384, EcCurve::P521] {
         for hash in [
             HashAlgorithm::Sha1,
@@ -448,12 +448,16 @@ fn ecdsa_sign_and_verify_capabilities_are_symmetric() {
             HashAlgorithm::Sha3_384,
             HashAlgorithm::Sha3_512,
         ] {
+            // Verification may be broader than signing: AWS-LC verifies the
+            // cross curve/digest pairs XML-DSig produces (e.g. P-384 with
+            // SHA-256) but only signs with its fixed matched pairs.
             let algorithm = SignatureAlgorithm::Ecdsa(curve, hash);
-            assert_eq!(
-                kryptering::supports(kryptering::Operation::Sign(algorithm)).unwrap(),
-                kryptering::supports(kryptering::Operation::Verify(algorithm)).unwrap(),
-                "asymmetric ECDSA capability for {algorithm:?}"
-            );
+            if kryptering::supports(kryptering::Operation::Sign(algorithm)).unwrap() {
+                assert!(
+                    kryptering::supports(kryptering::Operation::Verify(algorithm)).unwrap(),
+                    "signable but unverifiable ECDSA capability for {algorithm:?}"
+                );
+            }
         }
     }
 }

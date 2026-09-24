@@ -75,7 +75,7 @@ ripemd = { version = "0.1", features = ["oid"], optional = true }
 des = { version = "0.9", optional = true }
 
 # Post-quantum (optional)
-ml-dsa = { version = "0.1.0", features = ["pkcs8", "rand_core"], optional = true }
+ml-dsa = { version = "0.1.0", features = ["pkcs8", "rand_core", "zeroize"], optional = true }
 slh-dsa = { version = "0.2.0-rc.5", optional = true }
 # `hazmat` is an empty feature that only un-hides encapsulate_deterministic
 # in the docs; we call it with fresh OS entropy because kem 0.3's

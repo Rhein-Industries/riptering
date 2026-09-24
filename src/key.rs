@@ -45,6 +45,7 @@ impl SoftwareKey {
                 let private = rsa::RsaPrivateKey::from_pkcs8_der(&der)
                     .map_err(|e| Error::Key(format!("RSA PKCS#8 import failed: {e}")))?;
                 let public = private.to_public_key();
+                enforce_rsa_min_bits(Operation::KeyImport(algorithm), &public)?;
                 RustCryptoKey::Rsa {
                     private: Some(private),
                     public,
@@ -74,7 +75,8 @@ impl SoftwareKey {
                 use p521::pkcs8::DecodePrivateKey;
                 let secret = p521::SecretKey::from_pkcs8_der(&der)
                     .map_err(|e| Error::Key(format!("P-521 PKCS#8 import failed: {e}")))?;
-                let private = p521::ecdsa::SigningKey::from_slice(secret.to_bytes().as_slice())
+                let secret_bytes = Zeroizing::new(secret.to_bytes());
+                let private = p521::ecdsa::SigningKey::from_slice(secret_bytes.as_slice())
                     .map_err(|e| Error::Key(format!("P-521 signing key import failed: {e}")))?;
                 let public = p521::ecdsa::VerifyingKey::from(&private);
                 RustCryptoKey::EcP521 {
@@ -121,6 +123,7 @@ impl SoftwareKey {
                 use rsa::pkcs8::DecodePublicKey;
                 let public = rsa::RsaPublicKey::from_public_key_der(der)
                     .map_err(|e| Error::Key(format!("RSA SPKI import failed: {e}")))?;
+                enforce_rsa_min_bits(Operation::KeyImport(algorithm), &public)?;
                 RustCryptoKey::Rsa {
                     private: None,
                     public,
@@ -269,7 +272,8 @@ impl SoftwareKey {
     ///
     /// `private_der` is a PKCS#8 encoding when present and `public_der` is an
     /// SPKI encoding. The selected provider validates support before any key
-    /// material is retained.
+    /// material is retained. Both encodings must parse, and when a private key
+    /// is present the public key derived from it must match `public_der`.
     #[cfg(feature = "post-quantum")]
     pub fn from_post_quantum_der(
         algorithm: crate::algorithm::PqAlgorithm,
@@ -280,6 +284,14 @@ impl SoftwareKey {
         require_supported(Operation::KeyImport(key_algorithm))?;
         if public_der.is_empty() {
             return Err(Error::Key("post-quantum SPKI must not be empty".into()));
+        }
+        match algorithm {
+            crate::algorithm::PqAlgorithm::MlDsa(_) | crate::algorithm::PqAlgorithm::SlhDsa(_) => {
+                crate::software::sign::validate_pq_import(algorithm, private_der, public_der)?
+            }
+            crate::algorithm::PqAlgorithm::MlKem(variant) => {
+                crate::software::kem::validate_import(variant, private_der, public_der)?
+            }
         }
         Ok(Self::from_rustcrypto(RustCryptoKey::PostQuantum {
             algorithm,
@@ -446,7 +458,7 @@ impl SoftwareKey {
             RustCryptoKey::EcP521 {
                 private: Some(private),
                 ..
-            } => p521::SecretKey::from_slice(private.to_bytes().as_slice())
+            } => p521::SecretKey::from_slice(Zeroizing::new(private.to_bytes()).as_slice())
                 .map_err(|e| Error::Key(format!("P-521 private conversion failed: {e}")))?
                 .to_pkcs8_der()
                 .map(|der| der.as_bytes().to_vec())
@@ -621,6 +633,24 @@ impl Drop for RustCryptoKey {
 
 impl ZeroizeOnDrop for RustCryptoKey {}
 
+/// Smallest RSA modulus accepted by any provider, matching AWS-LC's
+/// `RSA_*_2048_8192_*` verification floor.
+pub(crate) const MIN_RSA_BITS: usize = 2048;
+
+/// Reject RSA keys below [`MIN_RSA_BITS`] with the same error the AWS-LC
+/// provider reports, so both providers refuse the same key sizes.
+pub(crate) fn enforce_rsa_min_bits(operation: Operation, public: &rsa::RsaPublicKey) -> Result<()> {
+    use rsa::traits::PublicKeyParts;
+    let bits = public.n().bits();
+    if bits < MIN_RSA_BITS {
+        return Err(Error::unsupported(
+            operation,
+            format!("{bits}-bit RSA key (kryptering requires at least {MIN_RSA_BITS} bits)"),
+        ));
+    }
+    Ok(())
+}
+
 impl From<RustCryptoKey> for SoftwareKey {
     fn from(key: RustCryptoKey) -> Self {
         Self::from_rustcrypto(key)
@@ -649,6 +679,95 @@ mod tests {
         let key = SoftwareKey::from_symmetric_bytes(KeyAlgorithm::Aes, &[7; 32]).unwrap();
         let clone = key.clone();
         assert!(Arc::ptr_eq(&key.0, &clone.0));
+    }
+
+    #[test]
+    fn rejects_rsa_keys_below_2048_bits_at_import() {
+        use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 1024).unwrap();
+        let pkcs8 = private.to_pkcs8_der().unwrap();
+        let spki = private.to_public_key().to_public_key_der().unwrap();
+
+        for error in [
+            SoftwareKey::from_pkcs8_der(KeyAlgorithm::Rsa, pkcs8.as_bytes()).unwrap_err(),
+            SoftwareKey::from_spki_der(KeyAlgorithm::Rsa, spki.as_bytes()).unwrap_err(),
+        ] {
+            assert!(
+                matches!(
+                    error,
+                    Error::UnsupportedAlgorithm {
+                        operation: Operation::KeyImport(KeyAlgorithm::Rsa),
+                        ref algorithm,
+                        ..
+                    } if algorithm.contains("1024-bit RSA key")
+                ),
+                "got {error:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn post_quantum_import_requires_matching_parseable_keys() {
+        use crate::algorithm::{MlDsaVariant, MlKemVariant, PqAlgorithm};
+
+        let cases = [
+            (
+                PqAlgorithm::MlDsa(MlDsaVariant::MlDsa44),
+                crate::software::sign::generate_ml_dsa(MlDsaVariant::MlDsa44).unwrap(),
+                crate::software::sign::generate_ml_dsa(MlDsaVariant::MlDsa44).unwrap(),
+            ),
+            (
+                PqAlgorithm::MlKem(MlKemVariant::MlKem512),
+                crate::software::kem::generate_ml_kem(MlKemVariant::MlKem512).unwrap(),
+                crate::software::kem::generate_ml_kem(MlKemVariant::MlKem512).unwrap(),
+            ),
+        ];
+        for (algorithm, a, b) in cases {
+            let a_private = a.export_private().unwrap();
+            let a_public = a.public_component().unwrap();
+            let b_public = b.public_component().unwrap();
+
+            SoftwareKey::from_post_quantum_der(algorithm, Some(&a_private), &a_public)
+                .expect("matching pair imports");
+            SoftwareKey::from_post_quantum_der(algorithm, None, &a_public)
+                .expect("public-only import");
+
+            let err = SoftwareKey::from_post_quantum_der(algorithm, Some(&a_private), &b_public)
+                .unwrap_err();
+            assert!(err.to_string().contains("does not match"), "{err}");
+            let err =
+                SoftwareKey::from_post_quantum_der(algorithm, None, b"not an SPKI").unwrap_err();
+            assert!(err.to_string().contains("failed to parse"), "{err}");
+            let err = SoftwareKey::from_post_quantum_der(algorithm, Some(b"junk"), &a_public)
+                .unwrap_err();
+            assert!(err.to_string().contains("failed to parse"), "{err}");
+        }
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn slh_dsa_import_rejects_private_key_with_forged_public_half() {
+        use crate::algorithm::{PqAlgorithm, SlhDsaVariant};
+        use pkcs8_pq::spki::EncodePublicKey;
+
+        // Fixed test seeds (n = 16 for SHA2-128f).
+        type P = slh_dsa::Sha2_128f;
+        let sk = slh_dsa::SigningKey::<P>::slh_keygen_internal(&[1; 16], &[2; 16], &[3; 16]);
+        let other = slh_dsa::SigningKey::<P>::slh_keygen_internal(&[4; 16], &[5; 16], &[6; 16]);
+        let other_public: &slh_dsa::VerifyingKey<_> = other.as_ref();
+        let other_spki = other_public.to_public_key_der().unwrap();
+        // Splice the other key's PK.seed || PK.root onto this key's secrets:
+        // the embedded public half now matches the SPKI but not the seeds.
+        let mut forged = sk.to_bytes().to_vec();
+        let n = forged.len() / 4;
+        forged[2 * n..].copy_from_slice(&other_public.to_bytes());
+
+        let algorithm = PqAlgorithm::SlhDsa(SlhDsaVariant::Sha2_128f);
+        let err =
+            SoftwareKey::from_post_quantum_der(algorithm, Some(&forged), other_spki.as_bytes())
+                .unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
     }
 
     #[test]

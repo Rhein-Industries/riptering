@@ -110,20 +110,25 @@ impl Pkcs11Provider {
     }
 
     fn open_session_on_slot(&self, pin: &[u8], slot: Slot) -> Result<Pkcs11Session> {
-        let pin_str = std::str::from_utf8(pin)
-            .map_err(|e| Error::Pkcs11(format!("PKCS#11 PIN must be valid UTF-8: {e}")))?;
+        use cryptoki::error::{Error as CrError, RvError};
         let session = self
             .pkcs11
             .open_rw_session(slot)
             .map_err(|e| Error::Pkcs11(format!("C_OpenSession failed: {e}")))?;
-        session
-            .login(
-                cryptoki::session::UserType::User,
-                // cryptoki 0.12: `AuthPin::new` takes `Box<str>` (via
-                // `secrecy::SecretString`) instead of `String`.
-                Some(&cryptoki::types::AuthPin::new(pin_str.to_owned().into())),
-            )
-            .map_err(|e| Error::Pkcs11(format!("C_Login failed: {e}")))?;
+        // `RawAuthPin` is `secrecy::SecretBox<Vec<u8>>`: the PIN bytes are
+        // passed to `C_Login` verbatim (no UTF-8 requirement) and the copy
+        // is zeroized on drop.
+        let raw_pin = cryptoki::types::RawAuthPin::new(Box::new(pin.to_vec()));
+        // Login state is per application per token (PKCS#11 v2.40 §5.6):
+        // once any session of this application is logged in, `C_Login` on a
+        // further session of the same token returns
+        // `CKR_USER_ALREADY_LOGGED_IN` and the new session is already
+        // authenticated. Treat that as success so concurrent sessions work.
+        match session.login_with_raw(cryptoki::session::UserType::User, &raw_pin) {
+            Ok(()) => {}
+            Err(CrError::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => {}
+            Err(e) => return Err(Error::Pkcs11(format!("C_Login failed: {e}"))),
+        }
         Ok(Pkcs11Session {
             session: Arc::new(Mutex::new(session)),
         })
@@ -196,9 +201,13 @@ fn format_slot_list(slots: &[Slot]) -> String {
 impl Pkcs11Provider {
     /// Open a read-write session and log in with the given UTF-8 PIN.
     ///
-    /// Internally the PIN is handed to `cryptoki::types::AuthPin` which
-    /// wraps it in `secrecy::SecretString` (zeroizes on drop). The caller
-    /// is responsible for wiping its own `pin` buffer after the call.
+    /// Internally the PIN bytes are copied into a
+    /// `cryptoki::types::RawAuthPin` (`secrecy::SecretBox<Vec<u8>>`, which
+    /// zeroizes on drop). The caller is responsible for wiping its own
+    /// `pin` buffer after the call.
+    ///
+    /// If this application is already logged in to the token through
+    /// another session, `CKR_USER_ALREADY_LOGGED_IN` is treated as success.
     ///
     /// For tokens that accept non-UTF-8 byte PINs, use
     /// [`open_session_bytes`](Self::open_session_bytes).
@@ -208,16 +217,16 @@ impl Pkcs11Provider {
 
     /// Open a read-write session and log in with a raw-byte PIN.
     ///
-    /// PKCS#11 `C_Login` defines the PIN as an arbitrary UTF-8 octet
-    /// string (PKCS#11 v2.40 §11.6) but some tokens accept binary PINs
-    /// in practice. This entrypoint lets the caller pass bytes directly;
-    /// non-UTF-8 bytes are rejected because cryptoki's `AuthPin` stores
-    /// a `secrecy::SecretString` internally.
+    /// PKCS#11 `C_Login` defines the PIN as a UTF-8 octet string
+    /// (PKCS#11 v2.40 §11.6) but some tokens accept binary PINs in
+    /// practice. This entrypoint passes the bytes to `C_Login` verbatim
+    /// via cryptoki's `Session::login_with_raw`; no UTF-8 validation is
+    /// performed.
     ///
     /// Zeroization contract: the caller's `pin` slice is not wiped by
-    /// this function — wipe it in the caller. The intermediate `String`
-    /// built here moves into `AuthPin`/`SecretString` which zeroizes on
-    /// drop.
+    /// this function — wipe it in the caller. The intermediate copy
+    /// built here lives in a `RawAuthPin` (`secrecy::SecretBox<Vec<u8>>`)
+    /// which zeroizes on drop.
     pub fn open_session_bytes(&self, pin: &[u8]) -> Result<Pkcs11Session> {
         self.open_session_on_slot(pin, self.slot)
     }
@@ -793,12 +802,28 @@ pub struct Pkcs11KeyWrapper {
 impl Pkcs11KeyWrapper {
     /// Create a new key wrapper.  `key_label` identifies the AES KEK on the
     /// token.
+    ///
+    /// For [`KeyWrapAlgorithm::AesKw`] the KEK's `CKA_VALUE_LEN` must match
+    /// the declared AES key size. Tokens that do not expose
+    /// `CKA_VALUE_LEN` skip this check.
     pub fn new(
         session: &Pkcs11Session,
         key_label: &str,
         algorithm: KeyWrapAlgorithm,
     ) -> Result<Self> {
         let key_handle = session.find_secret_key(key_label)?;
+        #[allow(irrefutable_let_patterns)] // TripleDesKw only exists with `legacy`
+        if let KeyWrapAlgorithm::AesKw(size) = algorithm {
+            let guard = session
+                .session
+                .lock()
+                .map_err(|e| Error::Pkcs11(format!("session lock poisoned: {e}")))?;
+            let attrs = guard
+                .get_attributes(key_handle, &[AttributeType::ValueLen])
+                .map_err(|e| Error::Pkcs11(format!("C_GetAttributeValue failed: {e}")))?;
+            drop(guard);
+            check_kek_value_len(&attrs, size.key_len())?;
+        }
         Ok(Self {
             session: Arc::clone(&session.session),
             key_handle,
@@ -833,6 +858,23 @@ impl KeyWrapper for Pkcs11KeyWrapper {
     }
 }
 
+/// Check a KEK's `CKA_VALUE_LEN` (if the token returned it) against the
+/// declared key size in bytes. An absent attribute is accepted.
+fn check_kek_value_len(attrs: &[Attribute], expected: usize) -> Result<()> {
+    for attr in attrs {
+        if let Attribute::ValueLen(len) = attr {
+            let actual = **len;
+            if usize::try_from(actual).ok() != Some(expected) {
+                return Err(Error::Pkcs11(format!(
+                    "PKCS#11 KEK length mismatch: token key has CKA_VALUE_LEN {actual} bytes, \
+                     algorithm declares {expected} bytes"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Map a [`KeyWrapAlgorithm`] to the corresponding PKCS#11 mechanism.
 fn keywrap_mechanism(algo: &KeyWrapAlgorithm, _operation: Operation) -> Result<Mechanism<'static>> {
     match algo {
@@ -858,7 +900,8 @@ pub struct Pkcs11KeyAgreement {
     key_handle: ObjectHandle,
     /// Expected byte-length of the derived shared secret.
     key_len: usize,
-    /// Curve inferred from the fixed-width shared-secret encoding.
+    /// Named curve read from the private key's `CKA_EC_PARAMS`, or `None`
+    /// if the token did not expose it or it is not P-256/P-384/P-521.
     curve: Option<crate::algorithm::EcCurve>,
 }
 
@@ -866,23 +909,47 @@ impl Pkcs11KeyAgreement {
     /// Create a new key agreement object.  `key_label` identifies the EC
     /// private key on the token, and `key_len` is the expected shared secret
     /// size in bytes (e.g. 32 for P-256).
+    ///
+    /// The curve used for FIPS policy checks is taken from the key's
+    /// `CKA_EC_PARAMS` (named-curve OID), not inferred from `key_len`.
     pub fn new(session: &Pkcs11Session, key_label: &str, key_len: usize) -> Result<Self> {
         let key_handle = session.find_private_key(key_label)?;
+        let guard = session
+            .session
+            .lock()
+            .map_err(|e| Error::Pkcs11(format!("session lock poisoned: {e}")))?;
+        let attrs = guard
+            .get_attributes(key_handle, &[AttributeType::EcParams])
+            .map_err(|e| Error::Pkcs11(format!("C_GetAttributeValue failed: {e}")))?;
+        drop(guard);
+        let curve = attrs.iter().find_map(|attr| match attr {
+            Attribute::EcParams(params) => ec_curve_for_ec_params(params),
+            _ => None,
+        });
         Ok(Self {
             session: Arc::clone(&session.session),
             key_handle,
             key_len,
-            curve: ec_curve_for_secret_len(key_len),
+            curve,
         })
     }
 }
 
-/// Infer the named curve from its fixed-width ECDH shared-secret length.
-fn ec_curve_for_secret_len(key_len: usize) -> Option<crate::algorithm::EcCurve> {
-    match key_len {
-        32 => Some(crate::algorithm::EcCurve::P256),
-        48 => Some(crate::algorithm::EcCurve::P384),
-        66 => Some(crate::algorithm::EcCurve::P521),
+/// DER-encoded `namedCurve` OIDs as they appear in `CKA_EC_PARAMS`.
+const OID_DER_P256: &[u8] = &[
+    0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, // 1.2.840.10045.3.1.7
+];
+const OID_DER_P384: &[u8] = &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22]; // 1.3.132.0.34
+const OID_DER_P521: &[u8] = &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23]; // 1.3.132.0.35
+
+/// Map a `CKA_EC_PARAMS` value (DER `ECParameters`) to a supported named
+/// curve. Explicit parameters, other named curves, and malformed encodings
+/// return `None`.
+fn ec_curve_for_ec_params(params: &[u8]) -> Option<crate::algorithm::EcCurve> {
+    match params {
+        OID_DER_P256 => Some(crate::algorithm::EcCurve::P256),
+        OID_DER_P384 => Some(crate::algorithm::EcCurve::P384),
+        OID_DER_P521 => Some(crate::algorithm::EcCurve::P521),
         _ => None,
     }
 }
@@ -894,10 +961,11 @@ impl KeyAgreement for Pkcs11KeyAgreement {
         } else {
             crate::backend::ensure_backend()?;
             #[cfg(feature = "fips")]
-            return Err(Error::Crypto(format!(
-                "FIPS policy cannot approve PKCS#11 ECDH with a {}-byte shared secret",
-                self.key_len
-            )));
+            return Err(Error::Crypto(
+                "FIPS policy cannot approve PKCS#11 ECDH: private key CKA_EC_PARAMS is not \
+                 the named curve P-256, P-384 or P-521"
+                    .into(),
+            ));
         }
         let ec_params = Ecdh1DeriveParams::new(EcKdf::null(), peer_public_key);
         let mechanism = Mechanism::Ecdh1Derive(ec_params);
@@ -913,6 +981,9 @@ impl KeyAgreement for Pkcs11KeyAgreement {
             })?),
             Attribute::Extractable(true),
             Attribute::Sensitive(false),
+            // Session object: never persisted to the token, and destroyed by
+            // the token at session close even if `C_DestroyObject` fails.
+            Attribute::Token(false),
         ];
 
         let session = self
@@ -923,38 +994,35 @@ impl KeyAgreement for Pkcs11KeyAgreement {
             .derive_key(&mechanism, self.key_handle, &template)
             .map_err(|e| Error::Pkcs11(format!("C_DeriveKey (ECDH) failed: {e}")))?;
 
-        // Read CKA_VALUE from the derived key.
-        let attrs = session
+        // Read CKA_VALUE, then destroy the extractable derived object on
+        // every path before propagating any error.
+        let value = session
             .get_attributes(derived_key, &[AttributeType::Value])
-            .map_err(|e| Error::Pkcs11(format!("C_GetAttributeValue failed: {e}")))?;
+            .map_err(|e| Error::Pkcs11(format!("C_GetAttributeValue failed: {e}")))
+            .and_then(|attrs| {
+                attrs
+                    .into_iter()
+                    .find_map(|attr| match attr {
+                        Attribute::Value(v) => Some(zeroize::Zeroizing::new(v)),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        Error::Pkcs11("CKA_VALUE not present on derived ECDH key".into())
+                    })
+            });
+        let destroyed = session.destroy_object(derived_key);
 
-        for attr in attrs {
-            if let Attribute::Value(v) = attr {
-                // Best-effort cleanup of the temporary derived-key object.
-                // Session-scoped secret keys are destroyed automatically when
-                // the session closes (PKCS#11 v2.40 §5.3, CKA_TOKEN=false by
-                // default from C_DeriveKey), so a failure here leaks only
-                // until session close and is not a correctness concern. We
-                // assert in debug builds to catch unexpected failures during
-                // development; in release we accept the (temporary) leak.
-                let destroy_result = session.destroy_object(derived_key);
-                debug_assert!(
-                    destroy_result.is_ok(),
-                    "ECDH derived-key destroy failed: {destroy_result:?}"
-                );
-                return Ok(v);
-            }
-        }
-
-        // Same best-effort cleanup on the failure path.
-        let destroy_result = session.destroy_object(derived_key);
-        debug_assert!(
-            destroy_result.is_ok(),
-            "ECDH derived-key destroy failed: {destroy_result:?}"
-        );
-        Err(Error::Pkcs11(
-            "CKA_VALUE not present on derived ECDH key".into(),
-        ))
+        // A failed destroy leaves an extractable copy of the shared secret
+        // on the token until the session closes. Fail closed so the caller
+        // learns about it (and can close the session to purge it) rather
+        // than silently continuing; the read secret is zeroized on drop.
+        let mut value = value?;
+        destroyed.map_err(|e| {
+            Error::Pkcs11(format!(
+                "C_DestroyObject failed for derived ECDH key; close the session to purge it: {e}"
+            ))
+        })?;
+        Ok(std::mem::take(&mut *value))
     }
 }
 
@@ -1210,19 +1278,25 @@ mod tests {
     }
 
     #[test]
-    fn ecdh_secret_lengths_map_to_fips_policy_curves() {
+    fn ec_params_named_curve_oids_map_to_fips_policy_curves() {
+        use crate::algorithm::EcCurve;
+        assert_eq!(ec_curve_for_ec_params(OID_DER_P256), Some(EcCurve::P256));
+        assert_eq!(ec_curve_for_ec_params(OID_DER_P384), Some(EcCurve::P384));
+        assert_eq!(ec_curve_for_ec_params(OID_DER_P521), Some(EcCurve::P521));
+        // secp256k1 (1.3.132.0.10) has a 32-byte secret but is not approved.
         assert_eq!(
-            ec_curve_for_secret_len(32),
-            Some(crate::algorithm::EcCurve::P256)
+            ec_curve_for_ec_params(&[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a]),
+            None
         );
-        assert_eq!(
-            ec_curve_for_secret_len(48),
-            Some(crate::algorithm::EcCurve::P384)
-        );
-        assert_eq!(
-            ec_curve_for_secret_len(66),
-            Some(crate::algorithm::EcCurve::P521)
-        );
-        assert_eq!(ec_curve_for_secret_len(31), None);
+        assert_eq!(ec_curve_for_ec_params(&[]), None);
+    }
+
+    #[test]
+    fn kek_value_len_check() {
+        let len = |n: usize| Attribute::ValueLen(n.try_into().unwrap());
+        assert!(check_kek_value_len(&[len(32)], 32).is_ok());
+        assert!(check_kek_value_len(&[len(16)], 32).is_err());
+        // Attribute not exposed by the token: fall through.
+        assert!(check_kek_value_len(&[], 32).is_ok());
     }
 }
