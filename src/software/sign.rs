@@ -411,8 +411,7 @@ fn validate_signing_key(algorithm: &SignatureAlgorithm, key: &SoftwareKey) -> Re
             Ok(())
         }
         _ => Err(Error::Key(format!(
-            "key type does not match algorithm {:?}",
-            algorithm
+            "key type does not match algorithm {algorithm:?}"
         ))),
     }
 }
@@ -480,8 +479,7 @@ fn validate_verifying_key(algorithm: &SignatureAlgorithm, key: &SoftwareKey) -> 
             Ok(())
         }
         _ => Err(Error::Key(format!(
-            "key type does not match algorithm {:?}",
-            algorithm
+            "key type does not match algorithm {algorithm:?}"
         ))),
     }
 }
@@ -647,8 +645,7 @@ fn ecdsa_sign(
             Ok(digest::p521_sig_to_raw(&sig))
         }
         _ => Err(Error::Key(format!(
-            "ECDSA {:?} private key required for signing",
-            curve
+            "ECDSA {curve:?} private key required for signing"
         ))),
     }
 }
@@ -710,8 +707,7 @@ fn ecdsa_verify(
             Ok(public.verify_prehash(&prehash, &sig).is_ok())
         }
         _ => Err(Error::Key(format!(
-            "ECDSA {:?} key required for verification",
-            curve
+            "ECDSA {curve:?} key required for verification"
         ))),
     }
 }
@@ -795,7 +791,7 @@ fn dsa_sign(key: &SoftwareKey, hash: HashAlgorithm, data: &[u8]) -> Result<Vec<u
         _ => {
             return Err(Error::unsupported(
                 crate::backend::Operation::Sign(SignatureAlgorithm::Dsa(hash)),
-                format!("DSA with {:?}", hash),
+                format!("DSA with {hash:?}"),
             ));
         }
     };
@@ -826,7 +822,7 @@ fn dsa_verify(
         _ => {
             return Err(Error::unsupported(
                 crate::backend::Operation::Verify(SignatureAlgorithm::Dsa(hash)),
-                format!("DSA with {:?}", hash),
+                format!("DSA with {hash:?}"),
             ));
         }
     };

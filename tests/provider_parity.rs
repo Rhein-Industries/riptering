@@ -5,12 +5,12 @@
 //! approved operations must give the same answers, and operations FIPS does
 //! not approve must be refused as unsupported rather than skipped.
 
-use kryptering::kdf::{HkdfParams, Pbkdf2Params};
-use kryptering::{
+use riptering::kdf::{HkdfParams, Pbkdf2Params};
+use riptering::{
     AesKeySize, EcCurve, HashAlgorithm, KeyAlgorithm, KeyWrapAlgorithm, Operation,
     SignatureAlgorithm, SoftwareKey, SoftwareSigner, SoftwareVerifier,
 };
-use kryptering::{Signer, Verifier};
+use riptering::{Signer, Verifier};
 
 fn decode(hex_value: &str) -> Vec<u8> {
     hex::decode(hex_value).expect("valid test vector")
@@ -18,9 +18,9 @@ fn decode(hex_value: &str) -> Vec<u8> {
 
 /// Assert that `operation` was refused as unsupported, as FIPS builds do for
 /// every operation the module does not approve.
-fn assert_refused<T>(result: kryptering::Result<T>, operation: Operation) {
+fn assert_refused<T>(result: riptering::Result<T>, operation: Operation) {
     match result {
-        Err(kryptering::Error::UnsupportedAlgorithm {
+        Err(riptering::Error::UnsupportedAlgorithm {
             operation: actual, ..
         }) if actual == operation => {}
         Err(error) => panic!("{operation:?} failed without being refused: {error}"),
@@ -30,7 +30,7 @@ fn assert_refused<T>(result: kryptering::Result<T>, operation: Operation) {
 
 #[test]
 fn raw_symmetric_import_rejects_asymmetric_families() {
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     for algorithm in [
         KeyAlgorithm::Rsa,
         KeyAlgorithm::Ec(EcCurve::P256),
@@ -50,7 +50,7 @@ fn raw_symmetric_import_rejects_asymmetric_families() {
 
 #[test]
 fn x25519_agreement_matches_rfc7748_and_checks_key_type() {
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     // RFC 7748 §6.1.
     let alice_private = decode("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
     let alice_public = decode("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
@@ -62,7 +62,7 @@ fn x25519_agreement_matches_rfc7748_and_checks_key_type() {
         // X25519 is not FIPS approved: every entry point refuses the RFC
         // inputs before inspecting them or the key type.
         assert_refused(
-            kryptering::keyagreement::ecdh_x25519(&bob_public, &alice_private),
+            riptering::keyagreement::ecdh_x25519(&bob_public, &alice_private),
             Operation::X25519Agreement,
         );
         assert_refused(
@@ -70,28 +70,28 @@ fn x25519_agreement_matches_rfc7748_and_checks_key_type() {
             Operation::KeyImport(KeyAlgorithm::X25519),
         );
         assert_refused(
-            kryptering::keyagreement::agree_x25519(&bob_public, &aes),
+            riptering::keyagreement::agree_x25519(&bob_public, &aes),
             Operation::X25519Agreement,
         );
     } else {
         assert_eq!(
-            kryptering::keyagreement::ecdh_x25519(&bob_public, &alice_private).unwrap(),
+            riptering::keyagreement::ecdh_x25519(&bob_public, &alice_private).unwrap(),
             shared
         );
         let alice = SoftwareKey::from_x25519(Some(&alice_private), &alice_public).unwrap();
         assert_eq!(
-            kryptering::keyagreement::agree_x25519(&bob_public, &alice).unwrap(),
+            riptering::keyagreement::agree_x25519(&bob_public, &alice).unwrap(),
             shared
         );
 
-        assert!(kryptering::keyagreement::agree_x25519(&bob_public, &aes).is_err());
-        assert!(kryptering::keyagreement::ecdh_x25519(&bob_public, &alice_private[..31]).is_err());
+        assert!(riptering::keyagreement::agree_x25519(&bob_public, &aes).is_err());
+        assert!(riptering::keyagreement::ecdh_x25519(&bob_public, &alice_private[..31]).is_err());
     }
 }
 
 #[test]
 fn signers_reject_keys_of_another_family() {
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     let hmac = SoftwareKey::from_symmetric_bytes(KeyAlgorithm::Hmac, b"secret").unwrap();
     for algorithm in [
         SignatureAlgorithm::RsaPkcs1v15(HashAlgorithm::Sha256),
@@ -127,7 +127,7 @@ fn p256_der(raw: &[u8]) -> Vec<u8> {
 fn ecdsa_verify_accepts_the_same_encodings() {
     use p256::pkcs8::{EncodePrivateKey, EncodePublicKey};
 
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     let private = p256::SecretKey::random(&mut rand::rngs::OsRng);
     let key = SoftwareKey::from_pkcs8_der(
         KeyAlgorithm::Ec(EcCurve::P256),
@@ -169,7 +169,7 @@ fn ecdsa_verifies_cross_curve_digest_pairs() {
     use p384::ecdsa::signature::hazmat::PrehashSigner;
     use p384::pkcs8::EncodePublicKey;
 
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     // XML-DSig pairs a P-384 key with whatever digest the URI names.
     let signing = p384::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
     let public = SoftwareKey::from_spki_der(
@@ -181,7 +181,7 @@ fn ecdsa_verifies_cross_curve_digest_pairs() {
             .as_bytes(),
     )
     .unwrap();
-    let digest = kryptering::digest::digest(HashAlgorithm::Sha256, b"cross").unwrap();
+    let digest = riptering::digest::digest(HashAlgorithm::Sha256, b"cross").unwrap();
     let signature: p384::ecdsa::Signature = signing.sign_prehash(&digest).unwrap();
     let verifier = SoftwareVerifier::new(
         SignatureAlgorithm::Ecdsa(EcCurve::P384, HashAlgorithm::Sha256),
@@ -196,7 +196,7 @@ fn ecdsa_verifies_cross_curve_digest_pairs() {
 fn rsa_keys_below_2048_bits_are_rejected() {
     use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
 
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 1024).unwrap();
     let spki = private.to_public_key().to_public_key_der().unwrap();
     let pkcs8 = private.to_pkcs8_der().unwrap();
@@ -206,13 +206,13 @@ fn rsa_keys_below_2048_bits_are_rejected() {
 
 #[test]
 fn aes_cbc_rejects_iv_only_input() {
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     for size in [AesKeySize::Aes128, AesKeySize::Aes256] {
         let key = vec![3; size.key_len()];
-        assert!(kryptering::hazmat::aes_cbc::decrypt(size, &key, &[9; 16]).is_err());
-        let sealed = kryptering::hazmat::aes_cbc::encrypt(size, &key, b"").unwrap();
+        assert!(riptering::hazmat::aes_cbc::decrypt(size, &key, &[9; 16]).is_err());
+        let sealed = riptering::hazmat::aes_cbc::encrypt(size, &key, b"").unwrap();
         assert_eq!(sealed.len(), 32);
-        assert!(kryptering::hazmat::aes_cbc::decrypt(size, &key, &sealed)
+        assert!(riptering::hazmat::aes_cbc::decrypt(size, &key, &sealed)
             .unwrap()
             .is_empty());
     }
@@ -220,7 +220,7 @@ fn aes_cbc_rejects_iv_only_input() {
 
 #[test]
 fn aes_key_wrap_matches_rfc3394_and_rejects_short_input() {
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     // RFC 3394 §4.1 and §4.6.
     let kek128 = decode("000102030405060708090A0B0C0D0E0F");
     let kek256 = decode("000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F");
@@ -240,28 +240,28 @@ fn aes_key_wrap_matches_rfc3394_and_rejects_short_input() {
         ),
     ] {
         let algorithm = KeyWrapAlgorithm::AesKw(size);
-        let wrapped = kryptering::keywrap::wrap(algorithm, kek, input).unwrap();
+        let wrapped = riptering::keywrap::wrap(algorithm, kek, input).unwrap();
         assert_eq!(wrapped, decode(expected));
         assert_eq!(
-            kryptering::keywrap::unwrap(algorithm, kek, &wrapped).unwrap(),
+            riptering::keywrap::unwrap(algorithm, kek, &wrapped).unwrap(),
             input
         );
         let mut tampered = wrapped.clone();
         tampered[0] ^= 1;
-        assert!(kryptering::keywrap::unwrap(algorithm, kek, &tampered).is_err());
+        assert!(riptering::keywrap::unwrap(algorithm, kek, &tampered).is_err());
 
-        assert!(kryptering::keywrap::wrap(algorithm, kek, &[]).is_err());
-        assert!(kryptering::keywrap::wrap(algorithm, kek, &[1; 8]).is_err());
-        assert!(kryptering::keywrap::wrap(algorithm, kek, &[1; 20]).is_err());
-        assert!(kryptering::keywrap::unwrap(algorithm, kek, &wrapped[..16]).is_err());
+        assert!(riptering::keywrap::wrap(algorithm, kek, &[]).is_err());
+        assert!(riptering::keywrap::wrap(algorithm, kek, &[1; 8]).is_err());
+        assert!(riptering::keywrap::wrap(algorithm, kek, &[1; 20]).is_err());
+        assert!(riptering::keywrap::unwrap(algorithm, kek, &wrapped[..16]).is_err());
     }
 }
 
 #[test]
 fn kdfs_match_rfc_vectors() {
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     // RFC 5869 A.2 (long inputs) and A.3 (no salt, no info).
-    let a2 = kryptering::kdf::hkdf_derive(
+    let a2 = riptering::kdf::hkdf_derive(
         &(0u8..=0x4f).collect::<Vec<_>>(),
         82,
         &HkdfParams {
@@ -280,7 +280,7 @@ fn kdfs_match_rfc_vectors() {
              cc30c58179ec3e87c14c01d5c1f3434f1d87"
         )
     );
-    let a3 = kryptering::kdf::hkdf_derive(&[0x0b; 22], 42, &HkdfParams::default()).unwrap();
+    let a3 = riptering::kdf::hkdf_derive(&[0x0b; 22], 42, &HkdfParams::default()).unwrap();
     assert_eq!(
         a3,
         decode(
@@ -288,7 +288,7 @@ fn kdfs_match_rfc_vectors() {
              9d201395faa4b61a96c8"
         )
     );
-    assert!(kryptering::kdf::hkdf_derive(&[1], 255 * 32 + 1, &HkdfParams::default()).is_err());
+    assert!(riptering::kdf::hkdf_derive(&[1], 255 * 32 + 1, &HkdfParams::default()).is_err());
 
     // Cross-checked against Python's hashlib.pbkdf2_hmac. The 8-byte salt and
     // password are below the SP 800-132 minimums FIPS builds enforce.
@@ -296,7 +296,7 @@ fn kdfs_match_rfc_vectors() {
         (HashAlgorithm::Sha256, 64, "2ecc2dfd549e0925a0e4a0b860368e7492b6e65339188d3e1e9e43799b90ff64cf800fb11ff3602b51ed7c8c766643c32be8af72829b3146642d9ddbdf8d7d6d"),
         (HashAlgorithm::Sha512, 40, "fee75217fa12304834340c9e672f9aaa9cc4bb229a9fd37edcdcd6ae57b42ad8ca5ea636c777c33c"),
     ] {
-        let output = kryptering::kdf::pbkdf2_derive(
+        let output = riptering::kdf::pbkdf2_derive(
             b"Password",
             &Pbkdf2Params {
                 hash,
@@ -309,7 +309,7 @@ fn kdfs_match_rfc_vectors() {
             assert!(
                 matches!(
                     output,
-                    Err(kryptering::Error::Crypto(ref message))
+                    Err(riptering::Error::Crypto(ref message))
                         if message.contains("SP 800-132")
                 ),
                 "{hash:?}: {output:?}"
@@ -326,7 +326,7 @@ fn kdfs_match_rfc_vectors() {
         (HashAlgorithm::Sha256, 64, "1e30cde84a0370317564c82ece78efb738195387129590d2fd3d7b48714a40c874de73f494b275b7147b58171cc17101b3cba6a0bd0a3766c839dd7e98f71aed"),
         (HashAlgorithm::Sha512, 40, "20ae6a68e7f944784e186fa29c12c6ae0926c736f4cdb5f025becc9c70a0e12cf39145acd1ad6113"),
     ] {
-        let output = kryptering::kdf::pbkdf2_derive(
+        let output = riptering::kdf::pbkdf2_derive(
             b"PasswordPassword",
             &Pbkdf2Params {
                 hash,

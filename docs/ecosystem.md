@@ -2,7 +2,7 @@
 
 **Last reviewed:** 2026-07-23
 **Tool:** `cargo outdated --depth 1` against the top-level `Cargo.toml`
-**Scope:** kryptering's direct RustCrypto / randomness deps only
+**Scope:** riptering's direct RustCrypto / randomness deps only
 (transitive deps are not evaluated here; `cargo audit` handles those)
 
 This document records which direct-dep major bumps are currently
@@ -36,7 +36,7 @@ explanation walks through each.
 > **Note (2026-06-01):** `signature 3.0.0` and `digest 0.11.3` have now
 > shipped as finals and are already present in the lockfile *transitively*
 > (pulled by the post-quantum crates — see the "Recently unblocked" section
-> below). They do **not** unblock Waves 1/3 for kryptering's direct
+> below). They do **not** unblock Waves 1/3 for riptering's direct
 > `rsa`/`ecdsa`/`dsa` deps: those crates still have no new major on
 > crates.io (`rsa 0.9.10`, `ecdsa 0.16.9`, `dsa 0.6.3` remain latest), so
 > they continue to pin `signature 2.2` / `digest 0.10` / `rand_core 0.6`.
@@ -65,7 +65,7 @@ and `digest 0.11` lines. New transitive deps pulled: `shake 0.1.0`,
 **Source fallout:** `ml-dsa 0.1.0` removed the `KeyGen` trait (in rc.8 it
 was a blanket `impl<P> KeyGen for P` used only as a bound). Key generation
 now lives on `SigningKey::<P>::generate()` via the new `Generate` trait.
-kryptering never called `key_gen` — it generates keys via
+riptering never called `key_gen` — it generates keys via
 `ExpandedSigningKey::<P>::from_seed` — so the fix was simply dropping the
 now-nonexistent `+ ml_dsa::KeyGen` bound from the four
 `P: ml_dsa::MlDsaParams + ml_dsa::KeyGen` sites in `src/software/sign.rs`.
@@ -99,7 +99,7 @@ des      0.8 -> 0.9   (legacy feature)
 `cipher` moved 0.4 -> 0.5 in the lockfile as a result. No half-wave:
 every direct block-cipher dep moved at once.
 
-**Source fallout** (all in kryptering's own code — verified against the
+**Source fallout** (all in riptering's own code — verified against the
 registry sources for each new major):
 
 - **cbc 0.2 (`cipher 0.5`)**: the block-mode traits were renamed
@@ -208,7 +208,7 @@ cipher 0.5 wave" above for the blocker table and source fallout.
 ## Composite-signature Ed448 dependency (2026-07-23)
 
 `draft-ietf-jose-pq-composite-sigs-03` requires Ed448 for its
-ML-DSA-87-Ed448 combination. Kryptering pins
+ML-DSA-87-Ed448 combination. Riptering pins
 `ed448-goldilocks =0.14.0-pre.15`, because that is still a pre-release and
 draft-vector behavior must not change through an implicit update. Only its
 `alloc` and `signing` features are enabled.
@@ -235,7 +235,7 @@ takes `&mut impl RngCore` or `&mut impl CryptoRngCore` from
 | `rsa 0.9`, `dsa 0.6` | same. |
 | `ed25519-dalek 2.1`, `x25519-dalek 2.0` | key generation takes `rand_core 0.6 CryptoRng` |
 
-Kryptering already straddles both versions deliberately (see
+Riptering already straddles both versions deliberately (see
 `docs/adr/0001-rng-choice.md`): ML-DSA uses `getrandom::SysRng` which
 is `rand_core 0.10 TryCryptoRng`, while RSA-PSS uses
 `rand::rngs::OsRng` which is `rand_core 0.6 CryptoRngCore`. Both

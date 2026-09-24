@@ -1,7 +1,8 @@
 # Cryptographic providers
 
-Kryptering 0.5 selects document cryptography and network TLS independently at
-compile time. It never falls back from one provider to another.
+riptering selects document cryptography and network TLS independently at
+compile time, as kryptering 0.5 introduced. It never falls back from one
+provider to another.
 
 See [ADR 0002](adr/0002-compile-time-provider-boundary.md) for the AWS-LC
 selection rationale, the sealed provider-trait design, and the requirements

@@ -23,7 +23,7 @@ pub fn encrypt(algorithm: CipherAlgorithm, key: &[u8], plaintext: &[u8]) -> Resu
     match algorithm {
         CipherAlgorithm::AesCbc(_) => Err(Error::unsupported(
             Operation::Encrypt(algorithm),
-            "AES-CBC moved to kryptering::hazmat::aes_cbc (unauthenticated; see module docs)"
+            "AES-CBC moved to riptering::hazmat::aes_cbc (unauthenticated; see module docs)"
                 .to_owned(),
         )),
         CipherAlgorithm::AesGcm(size) => aes_gcm_encrypt(size, key, plaintext),
@@ -44,7 +44,7 @@ pub fn decrypt(algorithm: CipherAlgorithm, key: &[u8], ciphertext: &[u8]) -> Res
     match algorithm {
         CipherAlgorithm::AesCbc(_) => Err(Error::unsupported(
             Operation::Decrypt(algorithm),
-            "AES-CBC moved to kryptering::hazmat::aes_cbc (unauthenticated; see module docs)"
+            "AES-CBC moved to riptering::hazmat::aes_cbc (unauthenticated; see module docs)"
                 .to_owned(),
         )),
         CipherAlgorithm::AesGcm(size) => aes_gcm_decrypt(size, key, ciphertext),
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn aes_cbc_rejected_from_generic_dispatcher() {
-        // AES-CBC now lives in kryptering::hazmat::aes_cbc. The generic
+        // AES-CBC now lives in riptering::hazmat::aes_cbc. The generic
         // cipher::{encrypt,decrypt} dispatcher must refuse to handle it so
         // callers see a clear error pointing at the hazmat path rather than
         // silently using an unauthenticated mode.
@@ -376,7 +376,7 @@ mod tests {
         // Use AES-GCM here — AES-CBC is now rejected by the generic dispatcher
         // regardless of key size, so it would pass this test for the wrong
         // reason. Key-size validation for CBC is exercised under
-        // kryptering::hazmat::aes_cbc::tests.
+        // riptering::hazmat::aes_cbc::tests.
         let result = encrypt(
             CipherAlgorithm::AesGcm(AesKeySize::Aes128),
             &[0u8; 15],

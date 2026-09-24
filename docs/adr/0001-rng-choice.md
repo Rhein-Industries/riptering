@@ -1,5 +1,10 @@
 # ADR 0001 — Choice of CSPRNG for signing paths
 
+> **Note (riptering fork):** this ADR is a historical record from
+> kryptering, written before Rhein Industries forked the crate and renamed it
+> `riptering` (0.6.0). "kryptering" below means the same code base; in
+> current code, use the `riptering` crate name.
+
 **Status:** Accepted
 **Date:** 2026-04-23
 **Deciders:** Kushal Das (crate author)

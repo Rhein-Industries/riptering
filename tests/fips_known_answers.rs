@@ -1,7 +1,7 @@
 #![cfg(feature = "fips")]
 
-use kryptering::kdf::{ConcatKdfParams, Pbkdf2Params};
-use kryptering::{AesKeySize, CipherAlgorithm, HashAlgorithm};
+use riptering::kdf::{ConcatKdfParams, Pbkdf2Params};
+use riptering::{AesKeySize, CipherAlgorithm, HashAlgorithm};
 
 fn decode(value: &str) -> Vec<u8> {
     hex::decode(value).expect("valid literal test vector")
@@ -9,22 +9,22 @@ fn decode(value: &str) -> Vec<u8> {
 
 #[test]
 fn fips_provider_matches_literal_known_answers() {
-    kryptering::initialize_backend().expect("FIPS provider initialization");
+    riptering::initialize_backend().expect("FIPS provider initialization");
 
     assert_eq!(
-        kryptering::digest::digest(HashAlgorithm::Sha256, b"abc").unwrap(),
+        riptering::digest::digest(HashAlgorithm::Sha256, b"abc").unwrap(),
         decode("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     );
 
     // NIST SP 800-38D, AES-128-GCM test case with a zero key, nonce, and
-    // one-block plaintext. Kryptering's wire format is nonce || ciphertext || tag.
+    // one-block plaintext. Riptering's wire format is nonce || ciphertext || tag.
     let framed = decode(
         "000000000000000000000000\
          0388dace60b6a392f328c2b971b2fe78\
          ab6e47d42cec13bdf53a67b21257bddf",
     );
     assert_eq!(
-        kryptering::cipher::decrypt(
+        riptering::cipher::decrypt(
             CipherAlgorithm::AesGcm(AesKeySize::Aes128),
             &[0; 16],
             &framed,
@@ -34,7 +34,7 @@ fn fips_provider_matches_literal_known_answers() {
     );
 
     assert_eq!(
-        kryptering::kdf::pbkdf2_derive(
+        riptering::kdf::pbkdf2_derive(
             b"password1234567",
             &Pbkdf2Params {
                 hash: HashAlgorithm::Sha256,
@@ -53,7 +53,7 @@ fn fips_provider_matches_literal_known_answers() {
         (&b"password1234567"[..], &b"saltsaltsaltsalt"[..], 999),
         (&b"password"[..], &b"saltsaltsaltsalt"[..], 1000),
     ] {
-        assert!(kryptering::kdf::pbkdf2_derive(
+        assert!(riptering::kdf::pbkdf2_derive(
             password,
             &Pbkdf2Params {
                 hash: HashAlgorithm::Sha256,
@@ -66,7 +66,7 @@ fn fips_provider_matches_literal_known_answers() {
     }
 
     assert_eq!(
-        kryptering::kdf::concat_kdf(
+        riptering::kdf::concat_kdf(
             b"shared secret",
             32,
             &ConcatKdfParams {
@@ -83,10 +83,10 @@ fn fips_provider_matches_literal_known_answers() {
 
 #[test]
 fn fips_provider_rejects_pkcs12_kdf() {
-    kryptering::initialize_backend().expect("FIPS provider initialization");
-    let error = kryptering::pkcs12::derive(
+    riptering::initialize_backend().expect("FIPS provider initialization");
+    let error = riptering::pkcs12::derive(
         HashAlgorithm::Sha256,
-        kryptering::pkcs12::ID_KEY,
+        riptering::pkcs12::ID_KEY,
         "password",
         b"saltsalt",
         2,
@@ -95,8 +95,8 @@ fn fips_provider_rejects_pkcs12_kdf() {
     .unwrap_err();
     assert!(matches!(
         error,
-        kryptering::Error::UnsupportedAlgorithm {
-            operation: kryptering::Operation::Pkcs12Kdf(HashAlgorithm::Sha256),
+        riptering::Error::UnsupportedAlgorithm {
+            operation: riptering::Operation::Pkcs12Kdf(HashAlgorithm::Sha256),
             ..
         }
     ));
@@ -104,7 +104,7 @@ fn fips_provider_rejects_pkcs12_kdf() {
 
 #[test]
 fn fips_provider_rejects_rsa_keys_below_2048_bits_at_import() {
-    kryptering::initialize_backend().expect("FIPS provider initialization");
+    riptering::initialize_backend().expect("FIPS provider initialization");
     // Literal 1024-bit RSA SubjectPublicKeyInfo. Parsing must reach the
     // explicit FIPS size gate rather than relying on a signature operation.
     let der = decode(
@@ -116,11 +116,11 @@ fn fips_provider_rejects_rsa_keys_below_2048_bits_at_import() {
          32ca56b79a0595486b8c17e60d0203010001",
     );
     let error =
-        kryptering::SoftwareKey::from_spki_der(kryptering::KeyAlgorithm::Rsa, &der).unwrap_err();
+        riptering::SoftwareKey::from_spki_der(riptering::KeyAlgorithm::Rsa, &der).unwrap_err();
     assert!(matches!(
         error,
-        kryptering::Error::UnsupportedAlgorithm {
-            operation: kryptering::Operation::KeyImport(kryptering::KeyAlgorithm::Rsa),
+        riptering::Error::UnsupportedAlgorithm {
+            operation: riptering::Operation::KeyImport(riptering::KeyAlgorithm::Rsa),
             ..
         }
     ));

@@ -1,4 +1,4 @@
-/// Errors produced by kryptering cryptographic operations.
+/// Errors produced by riptering cryptographic operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("cryptographic operation failed: {0}")]

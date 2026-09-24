@@ -1,11 +1,11 @@
 #![cfg(any(feature = "tls-ring", feature = "tls-aws-lc"))]
 
-use kryptering::{FipsStatus, TlsBackendId};
+use riptering::{FipsStatus, TlsBackendId};
 
 #[test]
 fn selected_tls_provider_builds_a_client_configuration() {
-    let backend = kryptering::initialize_backend().expect("provider initialization");
-    let config = kryptering::build_tls_client_config(rustls::RootCertStore::empty())
+    let backend = riptering::initialize_backend().expect("provider initialization");
+    let config = riptering::build_tls_client_config(rustls::RootCertStore::empty())
         .expect("TLS client configuration");
 
     #[cfg(feature = "tls-ring")]

@@ -49,7 +49,7 @@ impl Pkcs11Provider {
     /// is pinned by configuration.
     ///
     /// If the library has already been initialized — either by another
-    /// `Pkcs11Provider` in the same process or by a non-kryptering PKCS#11
+    /// `Pkcs11Provider` in the same process or by a non-riptering PKCS#11
     /// user — `C_Initialize` returning `CKR_CRYPTOKI_ALREADY_INITIALIZED` is
     /// treated as success. Creating multiple providers over the same library
     /// path is therefore safe; the first call wins, the others no-op on the
@@ -134,8 +134,8 @@ impl Pkcs11Provider {
         // is zeroized on drop.
         let raw_pin = cryptoki::types::RawAuthPin::new(Box::new(pin.to_vec()));
         // Held across `C_OpenSession` and `C_Login`, so that no other
-        // kryptering login in this process interleaves and every session
-        // kryptering opens is tracked before the next one looks; see
+        // riptering login in this process interleaves and every session
+        // riptering opens is tracked before the next one looks; see
         // [`LoginRecord`].
         let mut logins = login_registry()
             .lock()
@@ -154,7 +154,7 @@ impl Pkcs11Provider {
         // further session of the same token returns
         // `CKR_USER_ALREADY_LOGGED_IN` without checking the PIN, and the new
         // session is already authenticated. Accept that only for the PIN of
-        // the login kryptering recorded; see [`LoginRegistry`]. A refused
+        // the login riptering recorded; see [`LoginRegistry`]. A refused
         // session is closed on return, while the lock is still held.
         match session.login_with_raw(cryptoki::session::UserType::User, &raw_pin) {
             Ok(()) => record.logged_in(verifier),
@@ -230,7 +230,7 @@ const PIN_VERIFIER_KEY_LEN: usize = 32;
 /// counter does not limit guessing against the record.
 const MAX_PIN_MISMATCHES: u32 = 3;
 
-/// PIN verifiers for the tokens this process logged in to through kryptering.
+/// PIN verifiers for the tokens this process logged in to through riptering.
 ///
 /// PKCS#11 cannot check a PIN without `C_Login`, and `C_Login` returns
 /// `CKR_USER_ALREADY_LOGGED_IN` without looking at the PIN once any session
@@ -244,7 +244,7 @@ const MAX_PIN_MISMATCHES: u32 = 3;
 ///
 /// A PIN change while the token stays logged in (`C_SetPIN` from this or
 /// another application) cannot be seen: the old PIN keeps matching until
-/// kryptering's sessions on the token are closed and the login ends.
+/// riptering's sessions on the token are closed and the login ends.
 #[derive(Default)]
 struct LoginRegistry {
     /// HMAC key, drawn from the provider RNG on first use.
@@ -252,20 +252,20 @@ struct LoginRegistry {
     tokens: HashMap<TokenIdentity, LoginRecord>,
 }
 
-/// Kryptering's login to one token.
+/// Riptering's login to one token.
 ///
 /// The login state lasts while any session of the application on the token
-/// is open. Kryptering opens sessions only under the registry lock and adds
+/// is open. Riptering opens sessions only under the registry lock and adds
 /// each one here before releasing it, so when none of them is alive the
 /// login the verifier belongs to has ended, or is kept alive by sessions
-/// opened outside kryptering: [`LoginRegistry::track`] then drops the
+/// opened outside riptering: [`LoginRegistry::track`] then drops the
 /// verifier. (A session still being closed on another thread can make a
 /// join fail closed in the meantime.)
 #[derive(Default)]
 struct LoginRecord {
     /// Verifier of the PIN of the last `C_Login` that returned `CKR_OK`.
     verifier: Option<Zeroizing<Vec<u8>>>,
-    /// Sessions kryptering opened on the token; closed ones are pruned.
+    /// Sessions riptering opened on the token; closed ones are pruned.
     sessions: Vec<Weak<Mutex<cryptoki::session::Session>>>,
     /// Wrong PINs checked against `verifier` since the last match.
     mismatches: u32,
@@ -318,7 +318,7 @@ impl LoginRecord {
         if self.mismatches >= MAX_PIN_MISMATCHES {
             return Err(Error::Pkcs11(format!(
                 "{MAX_PIN_MISMATCHES} wrong PINs while the token is logged in: further sessions \
-                 are refused until kryptering's sessions on the token are closed"
+                 are refused until riptering's sessions on the token are closed"
             )));
         }
         match &self.verifier {
@@ -337,7 +337,7 @@ impl LoginRecord {
                 ))
             }
             None => Err(Error::Pkcs11(
-                "cannot verify PIN: token already logged in outside kryptering".into(),
+                "cannot verify PIN: token already logged in outside riptering".into(),
             )),
         }
     }
@@ -417,10 +417,10 @@ impl Pkcs11Provider {
     /// If this process is already logged in to the token through another
     /// session, `C_Login` returns `CKR_USER_ALREADY_LOGGED_IN` without
     /// checking the PIN. The session is then opened only if `pin` equals the
-    /// PIN of the kryptering login still in effect on that token, from any
+    /// PIN of the riptering login still in effect on that token, from any
     /// [`Pkcs11Provider`]; otherwise this fails with [`Error::Pkcs11`]. After
     /// three wrong PINs in a row every further session is refused until
-    /// kryptering's sessions on the token are closed. See
+    /// riptering's sessions on the token are closed. See
     /// [`open_session_bytes`](Self::open_session_bytes) for details.
     ///
     /// For tokens that accept non-UTF-8 byte PINs, use
@@ -453,18 +453,18 @@ impl Pkcs11Provider {
     /// supplied PIN matches that record in constant time; otherwise this
     /// returns [`Error::Pkcs11`] ("token is already logged in by this
     /// process with a different PIN"). The record is kept only while a
-    /// session kryptering opened on the token (or an object made from one)
+    /// session riptering opened on the token (or an object made from one)
     /// is alive. Once they are all closed the login has ended; a login that
-    /// is still in place was made outside kryptering and is not joined, even
+    /// is still in place was made outside riptering and is not joined, even
     /// with the right PIN ("cannot verify PIN").
     ///
     /// Those wrong PINs never reach the token, so its retry counter does not
     /// limit them. After three in a row this refuses every further session,
-    /// with the right PIN too, until kryptering's sessions on the token are
+    /// with the right PIN too, until riptering's sessions on the token are
     /// closed and the next `C_Login` is checked by the token again.
     ///
     /// A PIN change made while the token is logged in (`C_SetPIN` from this
-    /// or another application) is not seen: until kryptering's sessions on
+    /// or another application) is not seen: until riptering's sessions on
     /// the token are closed, the old PIN still opens a session and the new
     /// one is refused.
     ///
@@ -1791,7 +1791,7 @@ mod tests {
         let mut record = LoginRecord::default();
         let err = record.check(&verifier).unwrap_err();
         assert!(
-            err.to_string().contains("logged in outside kryptering"),
+            err.to_string().contains("logged in outside riptering"),
             "got: {err}"
         );
 
@@ -1848,13 +1848,13 @@ mod tests {
         assert!(record.check(&wrong).is_err());
         assert_eq!(record.mismatches, 1);
 
-        // No session kryptering opened is alive: the login may have ended.
+        // No session riptering opened is alive: the login may have ended.
         let record = logins.track(token("a"));
         assert!(record.verifier.is_none());
         assert_eq!(record.mismatches, 0);
         let err = record.check(&right).unwrap_err();
         assert!(
-            err.to_string().contains("logged in outside kryptering"),
+            err.to_string().contains("logged in outside riptering"),
             "got: {err}"
         );
         // Records are per token.
@@ -1885,8 +1885,8 @@ mod tests {
         );
         // A bare name the loader resolves stays as given.
         assert_eq!(
-            module_identity(Path::new("libkryptering-missing-module.so")),
-            ModuleIdentity::Path(PathBuf::from("libkryptering-missing-module.so"))
+            module_identity(Path::new("libriptering-missing-module.so")),
+            ModuleIdentity::Path(PathBuf::from("libriptering-missing-module.so"))
         );
     }
 

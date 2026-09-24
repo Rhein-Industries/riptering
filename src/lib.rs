@@ -1,3 +1,12 @@
+//! riptering: one provider-neutral cryptography API over a software provider
+//! selected at compile time (RustCrypto or AWS-LC) and over PKCS#11 HSMs.
+//!
+//! riptering is Rhein Industries' maintained fork of
+//! [kryptering](https://github.com/kushaldas/kryptering) by Kushal Das and is
+//! not affiliated with or endorsed by the upstream author. See the
+//! [README](https://github.com/Rhein-Industries/riptering#readme) for the
+//! differences from kryptering 0.5.0, feature selection and examples.
+
 #[cfg(not(any(feature = "rustcrypto", feature = "aws-lc")))]
 compile_error!("select exactly one document provider: rustcrypto or aws-lc");
 #[cfg(all(feature = "rustcrypto", feature = "aws-lc"))]

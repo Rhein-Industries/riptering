@@ -232,7 +232,7 @@ fn enforce_key_strength(algorithm: KeyAlgorithm, public_der: &[u8]) -> Result<()
     if bits < 2048 {
         return Err(Error::unsupported(
             Operation::KeyImport(algorithm),
-            format!("{bits}-bit RSA key (kryptering requires at least 2048 bits)"),
+            format!("{bits}-bit RSA key (riptering requires at least 2048 bits)"),
         ));
     }
     Ok(())

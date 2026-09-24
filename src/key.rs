@@ -417,7 +417,8 @@ impl SoftwareKey {
     ///
     /// X25519 retains its historical raw-byte behavior. Composite ML-DSA keys
     /// are rejected because their draft encoding is an aggregate raw value;
-    /// use [`export_composite_public`](Self::export_composite_public).
+    /// use `export_composite_public` (available with the `post-quantum`
+    /// feature).
     pub fn export_spki_der(&self) -> Result<Vec<u8>> {
         require_supported(Operation::KeyExport(self.algorithm()))?;
         #[cfg(feature = "post-quantum")]
@@ -645,7 +646,7 @@ pub(crate) fn enforce_rsa_min_bits(operation: Operation, public: &rsa::RsaPublic
     if bits < MIN_RSA_BITS {
         return Err(Error::unsupported(
             operation,
-            format!("{bits}-bit RSA key (kryptering requires at least {MIN_RSA_BITS} bits)"),
+            format!("{bits}-bit RSA key (riptering requires at least {MIN_RSA_BITS} bits)"),
         ));
     }
     Ok(())

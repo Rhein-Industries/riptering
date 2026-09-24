@@ -322,7 +322,7 @@ fn aws_lc_verify(
         if modulus_bits < 2048 {
             return Err(Error::unsupported(
                 Operation::Verify(algorithm),
-                format!("{modulus_bits}-bit RSA key (kryptering requires at least 2048 bits)"),
+                format!("{modulus_bits}-bit RSA key (riptering requires at least 2048 bits)"),
             ));
         }
     }
@@ -447,7 +447,7 @@ pub mod cipher {
         match algorithm {
             CipherAlgorithm::AesCbc(_) => Err(Error::unsupported(
                 Operation::Encrypt(algorithm),
-                "AES-CBC moved to kryptering::hazmat::aes_cbc (unauthenticated; see module docs)",
+                "AES-CBC moved to riptering::hazmat::aes_cbc (unauthenticated; see module docs)",
             )),
             CipherAlgorithm::AesGcm(size) => gcm_encrypt(size, key, data),
             #[cfg(feature = "legacy")]
@@ -460,7 +460,7 @@ pub mod cipher {
         match algorithm {
             CipherAlgorithm::AesCbc(_) => Err(Error::unsupported(
                 Operation::Decrypt(algorithm),
-                "AES-CBC moved to kryptering::hazmat::aes_cbc (unauthenticated; see module docs)",
+                "AES-CBC moved to riptering::hazmat::aes_cbc (unauthenticated; see module docs)",
             )),
             CipherAlgorithm::AesGcm(size) => gcm_decrypt(size, key, data),
             #[cfg(feature = "legacy")]

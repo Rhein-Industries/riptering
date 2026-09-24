@@ -1,5 +1,10 @@
 # ADR 0002 — Compile-time provider boundary and AWS-LC integration
 
+> **Note (riptering fork):** this ADR is a historical record from
+> kryptering, written before Rhein Industries forked the crate and renamed it
+> `riptering` (0.6.0). "kryptering" below means the same code base; in
+> current code, use the `riptering` crate name.
+
 **Status:** Accepted
 **Date:** 2026-07-20
 **Deciders:** Kushal Das (crate author)

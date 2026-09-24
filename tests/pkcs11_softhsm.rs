@@ -1,9 +1,9 @@
 #![cfg(all(feature = "pkcs11", not(feature = "fips"), not(target_arch = "wasm32")))]
 //! End-to-end PKCS#11 coverage against a private SoftHSM2 token.
 //!
-//! Skipped unless `KRYPTERING_TEST_SOFTHSM2_MODULE` names the SoftHSM2 module
+//! Skipped unless `RIPTERING_TEST_SOFTHSM2_MODULE` names the SoftHSM2 module
 //! (typically `/usr/lib/softhsm/libsofthsm2.so`). Token setup talks to
-//! cryptoki directly; every assertion goes through Kryptering's public
+//! cryptoki directly; every assertion goes through Riptering's public
 //! PKCS#11 API. SoftHSM2 reads the process-global `SOFTHSM2_CONF` once, at
 //! the first `C_Initialize`, so all cases run in order from a single test.
 
@@ -16,23 +16,23 @@ use cryptoki::object::{Attribute, AttributeType, KeyType, ObjectClass, ObjectHan
 use cryptoki::session::{Session, UserType};
 use cryptoki::slot::Slot;
 use cryptoki::types::{AuthPin, RawAuthPin};
-use kryptering::pkcs11::{
+use riptering::pkcs11::{
     Pkcs11Cipher, Pkcs11Decryptor, Pkcs11Encryptor, Pkcs11HmacSigner, Pkcs11KeyAgreement,
     Pkcs11KeyWrapper, Pkcs11Provider, Pkcs11Session, Pkcs11Signer, Pkcs11Verifier,
 };
-use kryptering::{
+use riptering::{
     AesKeySize, CipherAlgorithm, EcCurve, HashAlgorithm, KeyAlgorithm, KeyTransportAlgorithm,
     KeyWrapAlgorithm, OaepConfig, SignatureAlgorithm, SoftwareKey, SoftwareVerifier,
 };
-use kryptering::{Decryptor, Encryptor, KeyAgreement, KeyWrapper, Signer, Verifier};
+use riptering::{Decryptor, Encryptor, KeyAgreement, KeyWrapper, Signer, Verifier};
 
-const MODULE_ENV: &str = "KRYPTERING_TEST_SOFTHSM2_MODULE";
+const MODULE_ENV: &str = "RIPTERING_TEST_SOFTHSM2_MODULE";
 
-const MAIN_TOKEN: &str = "kryptering-main";
-const RAW_PIN_TOKEN: &str = "kryptering-raw-pin";
-const SO_PIN: &str = "kryptering-so-pin";
-const USER_PIN: &str = "kryptering-user-pin";
-const ROTATED_USER_PIN: &str = "kryptering-rotated-pin";
+const MAIN_TOKEN: &str = "riptering-main";
+const RAW_PIN_TOKEN: &str = "riptering-raw-pin";
+const SO_PIN: &str = "riptering-so-pin";
+const USER_PIN: &str = "riptering-user-pin";
+const ROTATED_USER_PIN: &str = "riptering-rotated-pin";
 /// Not UTF-8: 0xff never occurs in UTF-8 and 0xc3 0x28 is a broken sequence.
 const RAW_USER_PIN: &[u8] = b"\xff\xfe raw \xc3\x28 pin";
 
@@ -52,7 +52,7 @@ const GCM_KEY_VALUE: [u8; 32] = [0x2b; 32];
 const KEK_KNOWN_VALUE: [u8; 32] = [0x6a; 32];
 const HMAC_KEY_VALUE: [u8; 32] = [0x0b; 32];
 const KEY_MATERIAL: [u8; 32] = [0x5c; 32];
-const MESSAGE: &[u8] = b"kryptering PKCS#11 SoftHSM2 message";
+const MESSAGE: &[u8] = b"riptering PKCS#11 SoftHSM2 message";
 
 /// DER `namedCurve` OID 1.2.840.10045.3.1.7 (P-256), as in `CKA_EC_PARAMS`.
 const P256_EC_PARAMS: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
@@ -131,7 +131,7 @@ fn provider_selection_pins_the_token(setup: &Pkcs11, module: &Path, main_slot: S
     assert_eq!(by_id.slot_id(), main_slot.id());
 
     for (label, serial) in [
-        ("kryptering-missing", None),
+        ("riptering-missing", None),
         (MAIN_TOKEN, Some("not-the-serial")),
     ] {
         let error = Pkcs11Provider::new_with_token(module, label, serial)
@@ -154,7 +154,7 @@ fn wrong_pin_is_rejected(provider: &Pkcs11Provider) {
 }
 
 /// With the application logged in, the token answers every `C_Login` with
-/// `CKR_USER_ALREADY_LOGGED_IN` without looking at the PIN, so Kryptering has
+/// `CKR_USER_ALREADY_LOGGED_IN` without looking at the PIN, so Riptering has
 /// to check it against the PIN of its own login. Each wrong PIN is followed
 /// by the right one, which resets the count of wrong PINs in a row.
 fn wrong_pin_is_rejected_while_logged_in(provider: &Pkcs11Provider) {
@@ -249,7 +249,7 @@ fn concurrent_sessions_share_the_login(module: &Path, provider: &Pkcs11Provider)
     assert!(verifier.verify(MESSAGE, &signature).expect("C_Verify"));
 }
 
-/// Wrong PINs checked against Kryptering's record never reach the token's
+/// Wrong PINs checked against Riptering's record never reach the token's
 /// retry counter, so after three in a row nothing joins the login any more,
 /// until it ends and the token checks the next `C_Login` itself.
 fn repeated_wrong_pins_suspend_joining(provider: &Pkcs11Provider) {
@@ -313,7 +313,7 @@ fn module_links_share_the_login(module: &Path, token_dir: &Path, provider: &Pkcs
 
 /// The next `C_Login` that succeeds sets the PIN the application's further
 /// sessions are held to (here after PIN changes), and a login made outside
-/// Kryptering is not taken for Kryptering's own.
+/// Riptering is not taken for Riptering's own.
 fn pin_change_takes_effect_with_the_next_login(
     setup: &Pkcs11,
     slot: Slot,
@@ -344,7 +344,7 @@ fn pin_change_takes_effect_with_the_next_login(
         .expect("the old PIN must not join the new login");
     assert!(error.to_string().contains("different PIN"), "got: {error}");
 
-    // C_Logout ends the login while Kryptering's sessions stay open; the
+    // C_Logout ends the login while Riptering's sessions stay open; the
     // next C_Login is checked by the token and replaces the record.
     let guard = first.session().lock().expect("session lock");
     set_pin(&guard, ROTATED_USER_PIN, USER_PIN);
@@ -363,19 +363,19 @@ fn pin_change_takes_effect_with_the_next_login(
     assert!(error.to_string().contains("different PIN"), "got: {error}");
     drop((first, second, third));
 
-    // Kryptering's login has ended. The PIN is changed and the token logged
-    // in outside Kryptering: neither the PIN of Kryptering's last login (now
+    // Riptering's login has ended. The PIN is changed and the token logged
+    // in outside Riptering: neither the PIN of Riptering's last login (now
     // stale) nor the new one joins that login.
     let outside = setup.open_rw_session(slot).expect("C_OpenSession");
     set_pin(&outside, USER_PIN, ROTATED_USER_PIN);
     outside
         .login(UserType::User, Some(&AuthPin::from(ROTATED_USER_PIN)))
-        .expect("C_Login outside Kryptering");
+        .expect("C_Login outside Riptering");
     for pin in [USER_PIN, ROTATED_USER_PIN] {
         let error = provider
             .open_session(pin)
             .err()
-            .expect("a login Kryptering did not make cannot be verified");
+            .expect("a login Riptering did not make cannot be verified");
         assert!(
             error.to_string().contains("cannot verify PIN"),
             "{pin:?}: {error}"
@@ -443,7 +443,7 @@ fn hmac_matches_software(session: &Pkcs11Session) {
     let tag = hmac.sign(MESSAGE).expect("C_Sign (HMAC)");
     assert_eq!(
         tag,
-        kryptering::digest::compute_hmac(HashAlgorithm::Sha256, &HMAC_KEY_VALUE, MESSAGE).unwrap()
+        riptering::digest::compute_hmac(HashAlgorithm::Sha256, &HMAC_KEY_VALUE, MESSAGE).unwrap()
     );
     assert!(hmac.verify(MESSAGE, &tag).unwrap());
     assert!(!hmac.verify(b"tampered", &tag).unwrap());
@@ -469,7 +469,7 @@ fn rsa_oaep_round_trips(session: &Pkcs11Session) {
         KEY_MATERIAL
     );
 
-    let software = kryptering::keytransport::kt_encrypt(
+    let software = riptering::keytransport::kt_encrypt(
         algorithm,
         &rsa_public_key(session),
         &KEY_MATERIAL,
@@ -494,11 +494,11 @@ fn aes_gcm_matches_software(session: &Pkcs11Session) {
     let sealed = cipher.encrypt(MESSAGE).expect("C_Encrypt (AES-GCM)");
     assert_eq!(sealed.len(), 12 + MESSAGE.len() + 16);
     assert_eq!(
-        kryptering::cipher::decrypt(algorithm, &GCM_KEY_VALUE, &sealed).unwrap(),
+        riptering::cipher::decrypt(algorithm, &GCM_KEY_VALUE, &sealed).unwrap(),
         MESSAGE
     );
 
-    let software = kryptering::cipher::encrypt(algorithm, &GCM_KEY_VALUE, MESSAGE).unwrap();
+    let software = riptering::cipher::encrypt(algorithm, &GCM_KEY_VALUE, MESSAGE).unwrap();
     assert_eq!(
         cipher
             .decrypt(&software)
@@ -587,7 +587,7 @@ fn key_wrapper_matches_software(setup: &Pkcs11, slot: Slot, session: &Pkcs11Sess
 
     // AES key wrap is deterministic: with a known KEK value the token's
     // output has to match the software provider byte for byte.
-    let software = kryptering::keywrap::wrap(algorithm, &KEK_KNOWN_VALUE, &KEY_MATERIAL).unwrap();
+    let software = riptering::keywrap::wrap(algorithm, &KEK_KNOWN_VALUE, &KEY_MATERIAL).unwrap();
     let token = kek_known.wrap(&KEY_MATERIAL).expect("C_WrapKey");
     assert_eq!(token, software);
     assert_eq!(
@@ -595,7 +595,7 @@ fn key_wrapper_matches_software(setup: &Pkcs11, slot: Slot, session: &Pkcs11Sess
         KEY_MATERIAL
     );
     assert_eq!(
-        kryptering::keywrap::unwrap(algorithm, &KEK_KNOWN_VALUE, &token).unwrap(),
+        riptering::keywrap::unwrap(algorithm, &KEK_KNOWN_VALUE, &token).unwrap(),
         KEY_MATERIAL
     );
 
@@ -640,7 +640,7 @@ fn ecdh_matches_software_and_destroys_the_secret(session: &Pkcs11Session) {
     )
     .unwrap();
     let expected =
-        kryptering::keyagreement::agree(EcCurve::P256, &ec_public_point(session), &peer_key)
+        riptering::keyagreement::agree(EcCurve::P256, &ec_public_point(session), &peer_key)
             .expect("software ECDH");
 
     assert_no_derived_secret(session, "before agree");
@@ -684,7 +684,7 @@ fn raw_non_utf8_pin_logs_in(setup: &Pkcs11, module: &Path, slot: Slot) {
     let provider = Pkcs11Provider::new_with_token(module, RAW_PIN_TOKEN, None)
         .expect("select the raw-PIN token");
 
-    // Kryptering holds no record of a login made past it, so it cannot tell
+    // Riptering holds no record of a login made past it, so it cannot tell
     // whether the PIN it is given is the one that login used: even the right
     // PIN is refused.
     let outside = setup.open_rw_session(slot).expect("C_OpenSession");
@@ -693,11 +693,11 @@ fn raw_non_utf8_pin_logs_in(setup: &Pkcs11, module: &Path, slot: Slot) {
             UserType::User,
             &RawAuthPin::new(Box::new(RAW_USER_PIN.to_vec())),
         )
-        .expect("C_Login outside Kryptering");
+        .expect("C_Login outside Riptering");
     let error = provider
         .open_session_bytes(RAW_USER_PIN)
         .err()
-        .expect("a login Kryptering did not make cannot be verified");
+        .expect("a login Riptering did not make cannot be verified");
     assert!(
         error.to_string().contains("cannot verify PIN"),
         "got: {error}"
@@ -722,7 +722,7 @@ fn raw_non_utf8_pin_logs_in(setup: &Pkcs11, module: &Path, slot: Slot) {
     let cipher = Pkcs11Cipher::new(&session, RAW_PIN_KEY, algorithm).expect("private key");
     let sealed = cipher.encrypt(MESSAGE).expect("C_Encrypt (AES-GCM)");
     assert_eq!(
-        kryptering::cipher::decrypt(algorithm, &GCM_KEY_VALUE, &sealed).unwrap(),
+        riptering::cipher::decrypt(algorithm, &GCM_KEY_VALUE, &sealed).unwrap(),
         MESSAGE
     );
 }

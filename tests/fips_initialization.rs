@@ -1,6 +1,6 @@
 #![cfg(feature = "fips")]
 
-use kryptering::{backend_info, supports, Error, FipsStatus, Operation};
+use riptering::{backend_info, supports, Error, FipsStatus, Operation};
 
 #[test]
 fn cryptography_fails_closed_before_explicit_initialization() {

@@ -59,8 +59,7 @@ pub fn agree(
             ecdh_p521(peer_public, &key)
         }
         _ => Err(Error::Key(format!(
-            "private {:?} key required for ECDH",
-            curve
+            "private {curve:?} key required for ECDH"
         ))),
     }
 }

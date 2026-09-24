@@ -1,10 +1,10 @@
-use kryptering::kdf::{ConcatKdfParams, HkdfParams, Pbkdf2Params};
-use kryptering::{
+use riptering::kdf::{ConcatKdfParams, HkdfParams, Pbkdf2Params};
+use riptering::{
     AesKeySize, CipherAlgorithm, EcCurve, HashAlgorithm, KeyAlgorithm, KeyTransportAlgorithm,
     KeyWrapAlgorithm, OaepConfig, Operation, SignatureAlgorithm, SoftwareKey, SoftwareSigner,
     SoftwareVerifier,
 };
-use kryptering::{Signer, Verifier};
+use riptering::{Signer, Verifier};
 
 fn decode(hex_value: &str) -> Vec<u8> {
     hex::decode(hex_value).expect("valid test vector")
@@ -12,9 +12,9 @@ fn decode(hex_value: &str) -> Vec<u8> {
 
 /// Assert that `operation` was refused as unsupported, as FIPS builds do for
 /// every operation the module does not approve.
-fn assert_refused<T>(result: kryptering::Result<T>, operation: Operation) {
+fn assert_refused<T>(result: riptering::Result<T>, operation: Operation) {
     match result {
-        Err(kryptering::Error::UnsupportedAlgorithm {
+        Err(riptering::Error::UnsupportedAlgorithm {
             operation: actual, ..
         }) if actual == operation => {}
         Err(error) => panic!("{operation:?} failed without being refused: {error}"),
@@ -24,19 +24,19 @@ fn assert_refused<T>(result: kryptering::Result<T>, operation: Operation) {
 
 #[test]
 fn digest_hmac_streaming_and_rng_known_answers() {
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     let expected = decode("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     assert_eq!(
-        kryptering::digest::digest(HashAlgorithm::Sha256, b"abc").unwrap(),
+        riptering::digest::digest(HashAlgorithm::Sha256, b"abc").unwrap(),
         expected
     );
 
-    let mut stream = kryptering::digest::new_digest(HashAlgorithm::Sha256).unwrap();
+    let mut stream = riptering::digest::new_digest(HashAlgorithm::Sha256).unwrap();
     stream.update(b"a");
     stream.update(b"bc");
     assert_eq!(stream.finalize().unwrap(), expected);
 
-    let mac = kryptering::digest::compute_hmac(
+    let mac = riptering::digest::compute_hmac(
         HashAlgorithm::Sha256,
         b"key",
         b"The quick brown fox jumps over the lazy dog",
@@ -47,8 +47,8 @@ fn digest_hmac_streaming_and_rng_known_answers() {
         decode("f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
     );
 
-    let first = kryptering::random_bytes(32).unwrap();
-    let second = kryptering::random_bytes(32).unwrap();
+    let first = riptering::random_bytes(32).unwrap();
+    let second = riptering::random_bytes(32).unwrap();
     assert_eq!(first.len(), 32);
     assert_ne!(
         first, second,
@@ -58,34 +58,34 @@ fn digest_hmac_streaming_and_rng_known_answers() {
 
 #[test]
 fn aes_gcm_cbc_and_key_wrap_interoperate_with_known_vectors() {
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     let plaintext = b"provider baseline plaintext";
     let key = [0x42; 16];
 
     let gcm =
-        kryptering::cipher::encrypt(CipherAlgorithm::AesGcm(AesKeySize::Aes128), &key, plaintext)
+        riptering::cipher::encrypt(CipherAlgorithm::AesGcm(AesKeySize::Aes128), &key, plaintext)
             .unwrap();
     assert_eq!(
-        kryptering::cipher::decrypt(CipherAlgorithm::AesGcm(AesKeySize::Aes128), &key, &gcm,)
+        riptering::cipher::decrypt(CipherAlgorithm::AesGcm(AesKeySize::Aes128), &key, &gcm,)
             .unwrap(),
         plaintext
     );
     let mut tampered = gcm;
     *tampered.last_mut().unwrap() ^= 1;
-    assert!(kryptering::cipher::decrypt(
+    assert!(riptering::cipher::decrypt(
         CipherAlgorithm::AesGcm(AesKeySize::Aes128),
         &key,
         &tampered,
     )
     .is_err());
 
-    let cbc = kryptering::hazmat::aes_cbc::encrypt(AesKeySize::Aes128, &key, plaintext).unwrap();
+    let cbc = riptering::hazmat::aes_cbc::encrypt(AesKeySize::Aes128, &key, plaintext).unwrap();
     assert_eq!(
-        kryptering::hazmat::aes_cbc::decrypt(AesKeySize::Aes128, &key, &cbc).unwrap(),
+        riptering::hazmat::aes_cbc::decrypt(AesKeySize::Aes128, &key, &cbc).unwrap(),
         plaintext
     );
     let length_error =
-        kryptering::hazmat::aes_cbc::decrypt(AesKeySize::Aes128, &key, &[0; 17]).unwrap_err();
+        riptering::hazmat::aes_cbc::decrypt(AesKeySize::Aes128, &key, &[0; 17]).unwrap_err();
     let mut bad_padding = cbc;
     // Flip the last byte of the preceding ciphertext block by the known
     // padding length. CBC XORs this value into the final plaintext byte,
@@ -97,7 +97,7 @@ fn aes_gcm_cbc_and_key_wrap_interoperate_with_known_vectors() {
     let padding_len = 16 - plaintext.len() % 16;
     bad_padding[preceding_block_last] ^= padding_len as u8;
     let padding_error =
-        kryptering::hazmat::aes_cbc::decrypt(AesKeySize::Aes128, &key, &bad_padding).unwrap_err();
+        riptering::hazmat::aes_cbc::decrypt(AesKeySize::Aes128, &key, &bad_padding).unwrap_err();
     assert_eq!(length_error.to_string(), padding_error.to_string());
     assert_eq!(
         length_error.to_string(),
@@ -107,14 +107,14 @@ fn aes_gcm_cbc_and_key_wrap_interoperate_with_known_vectors() {
     let kek = decode("000102030405060708090a0b0c0d0e0f");
     let key_data = decode("00112233445566778899aabbccddeeff");
     let wrapped =
-        kryptering::keywrap::wrap(KeyWrapAlgorithm::AesKw(AesKeySize::Aes128), &kek, &key_data)
+        riptering::keywrap::wrap(KeyWrapAlgorithm::AesKw(AesKeySize::Aes128), &kek, &key_data)
             .unwrap();
     assert_eq!(
         wrapped,
         decode("1fa68b0a8112b447aef34bd8fb5a7b829d3e862371d2cfe5")
     );
     assert_eq!(
-        kryptering::keywrap::unwrap(KeyWrapAlgorithm::AesKw(AesKeySize::Aes128), &kek, &wrapped,)
+        riptering::keywrap::unwrap(KeyWrapAlgorithm::AesKw(AesKeySize::Aes128), &kek, &wrapped,)
             .unwrap(),
         key_data
     );
@@ -122,17 +122,17 @@ fn aes_gcm_cbc_and_key_wrap_interoperate_with_known_vectors() {
 
 #[test]
 fn generic_cipher_dispatcher_rejects_unauthenticated_aes_cbc() {
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     let algorithm = CipherAlgorithm::AesCbc(AesKeySize::Aes128);
     let key = [0x42; 16];
     for error in [
-        kryptering::cipher::encrypt(algorithm, &key, b"plaintext").unwrap_err(),
-        kryptering::cipher::decrypt(algorithm, &key, &[0; 32]).unwrap_err(),
+        riptering::cipher::encrypt(algorithm, &key, b"plaintext").unwrap_err(),
+        riptering::cipher::decrypt(algorithm, &key, &[0; 32]).unwrap_err(),
     ] {
         assert!(
             matches!(
                 error,
-                kryptering::Error::UnsupportedAlgorithm { ref algorithm, .. }
+                riptering::Error::UnsupportedAlgorithm { ref algorithm, .. }
                     if algorithm.contains("hazmat::aes_cbc")
             ),
             "unexpected error: {error:?}"
@@ -142,8 +142,8 @@ fn generic_cipher_dispatcher_rejects_unauthenticated_aes_cbc() {
 
 #[test]
 fn kdfs_match_known_answers() {
-    kryptering::initialize_backend().expect("provider initialization");
-    let concat = kryptering::kdf::concat_kdf(
+    riptering::initialize_backend().expect("provider initialization");
+    let concat = riptering::kdf::concat_kdf(
         b"shared secret",
         32,
         &ConcatKdfParams {
@@ -161,7 +161,7 @@ fn kdfs_match_known_answers() {
 
     // Two iterations and an 8-byte salt and password are below the SP 800-132
     // minimums FIPS builds enforce.
-    let pbkdf2 = kryptering::kdf::pbkdf2_derive(
+    let pbkdf2 = riptering::kdf::pbkdf2_derive(
         b"password",
         &Pbkdf2Params {
             hash: HashAlgorithm::Sha256,
@@ -174,7 +174,7 @@ fn kdfs_match_known_answers() {
         assert!(
             matches!(
                 pbkdf2,
-                Err(kryptering::Error::Crypto(ref message))
+                Err(riptering::Error::Crypto(ref message))
                     if message.contains("SP 800-132")
             ),
             "{pbkdf2:?}"
@@ -189,7 +189,7 @@ fn kdfs_match_known_answers() {
     // SP 800-132 compliant parameters, which every provider including FIPS
     // must derive identically. Cross-checked against Python's
     // hashlib.pbkdf2_hmac.
-    let compliant = kryptering::kdf::pbkdf2_derive(
+    let compliant = riptering::kdf::pbkdf2_derive(
         b"password1234567",
         &Pbkdf2Params {
             hash: HashAlgorithm::Sha256,
@@ -204,7 +204,7 @@ fn kdfs_match_known_answers() {
         decode("724279c0f9e0aa29e8ddf3c22073ec166b6677aa6ccf007e2f7e3bacbb6a03a7")
     );
 
-    let hkdf = kryptering::kdf::hkdf_derive(
+    let hkdf = riptering::kdf::hkdf_derive(
         &[0x0b; 22],
         42,
         &HkdfParams {
@@ -228,7 +228,7 @@ fn kdfs_match_known_answers() {
 fn rsa_signatures_and_transport_use_opaque_imported_keys() {
     use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
 
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).unwrap();
     let private_der = private.to_pkcs8_der().unwrap();
     let public_der = private.to_public_key().to_public_key_der().unwrap();
@@ -239,7 +239,7 @@ fn rsa_signatures_and_transport_use_opaque_imported_keys() {
     #[cfg(feature = "aws-lc")]
     assert!(matches!(
         SoftwareVerifier::new_rsa_pss_with_salt(HashAlgorithm::Sha256, 48, public_key.clone(),),
-        Err(kryptering::Error::UnsupportedAlgorithm { .. })
+        Err(riptering::Error::UnsupportedAlgorithm { .. })
     ));
     if cfg!(feature = "fips") {
         // AWS-LC implements SHA-1 PKCS#1 v1.5 verification and SHA-1 OAEP,
@@ -254,11 +254,11 @@ fn rsa_signatures_and_transport_use_opaque_imported_keys() {
             mgf_digest: HashAlgorithm::Sha1,
         });
         assert_refused(
-            kryptering::keytransport::kt_encrypt(sha1_oaep, &public_key, b"sixteen byte key", None),
+            riptering::keytransport::kt_encrypt(sha1_oaep, &public_key, b"sixteen byte key", None),
             Operation::TransportEncrypt(sha1_oaep),
         );
         assert_refused(
-            kryptering::keytransport::kt_decrypt(sha1_oaep, &private_key, &[0; 256], None),
+            riptering::keytransport::kt_decrypt(sha1_oaep, &private_key, &[0; 256], None),
             Operation::TransportDecrypt(sha1_oaep),
         );
     }
@@ -279,7 +279,7 @@ fn rsa_signatures_and_transport_use_opaque_imported_keys() {
     }
 
     let algorithm = KeyTransportAlgorithm::RsaOaep(OaepConfig::default());
-    let encrypted = kryptering::keytransport::kt_encrypt(
+    let encrypted = riptering::keytransport::kt_encrypt(
         algorithm,
         &public_key,
         b"sixteen byte key",
@@ -287,7 +287,7 @@ fn rsa_signatures_and_transport_use_opaque_imported_keys() {
     )
     .unwrap();
     assert_eq!(
-        kryptering::keytransport::kt_decrypt(
+        riptering::keytransport::kt_decrypt(
             algorithm,
             &private_key,
             &encrypted,
@@ -296,7 +296,7 @@ fn rsa_signatures_and_transport_use_opaque_imported_keys() {
         .unwrap(),
         b"sixteen byte key"
     );
-    assert!(kryptering::keytransport::kt_decrypt(
+    assert!(riptering::keytransport::kt_decrypt(
         algorithm,
         &private_key,
         &encrypted,
@@ -310,7 +310,7 @@ fn ecdsa_ed25519_and_agreement_use_neutral_key_formats() {
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use p256::elliptic_curve::sec1::ToEncodedPoint;
 
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     let ec_private = p256::SecretKey::random(&mut rand::rngs::OsRng);
     let ec_private_der = ec_private.to_pkcs8_der().unwrap();
     let ec_public_der = ec_private.public_key().to_public_key_der().unwrap();
@@ -335,13 +335,13 @@ fn ecdsa_ed25519_and_agreement_use_neutral_key_formats() {
     let peer_der = peer.to_pkcs8_der().unwrap();
     let peer_key =
         SoftwareKey::from_pkcs8_der(KeyAlgorithm::Ec(EcCurve::P256), peer_der.as_bytes()).unwrap();
-    let ec_shared = kryptering::keyagreement::agree(
+    let ec_shared = riptering::keyagreement::agree(
         EcCurve::P256,
         peer.public_key().to_encoded_point(false).as_bytes(),
         &ec_private_key,
     )
     .unwrap();
-    let peer_shared = kryptering::keyagreement::agree(
+    let peer_shared = riptering::keyagreement::agree(
         EcCurve::P256,
         ec_private.public_key().to_encoded_point(false).as_bytes(),
         &peer_key,
@@ -395,11 +395,11 @@ fn ecdsa_ed25519_and_agreement_use_neutral_key_formats() {
             Operation::KeyImport(KeyAlgorithm::X25519),
         );
         assert_refused(
-            kryptering::keyagreement::ecdh_x25519(bob_public.as_bytes(), alice.as_bytes()),
+            riptering::keyagreement::ecdh_x25519(bob_public.as_bytes(), alice.as_bytes()),
             Operation::X25519Agreement,
         );
         assert_refused(
-            kryptering::keyagreement::agree_x25519(bob_public.as_bytes(), &ec_private_key),
+            riptering::keyagreement::agree_x25519(bob_public.as_bytes(), &ec_private_key),
             Operation::X25519Agreement,
         );
     } else {
@@ -408,10 +408,10 @@ fn ecdsa_ed25519_and_agreement_use_neutral_key_formats() {
         let bob_key =
             SoftwareKey::from_x25519(Some(bob.as_bytes()), bob_public.as_bytes()).unwrap();
         assert_eq!(
-            kryptering::keyagreement::agree_x25519(bob_public.as_bytes(), &alice_key).unwrap(),
-            kryptering::keyagreement::agree_x25519(alice_public.as_bytes(), &bob_key).unwrap()
+            riptering::keyagreement::agree_x25519(bob_public.as_bytes(), &alice_key).unwrap(),
+            riptering::keyagreement::agree_x25519(alice_public.as_bytes(), &bob_key).unwrap()
         );
-        assert!(kryptering::keyagreement::agree_x25519(&[0; 32], &alice_key).is_err());
+        assert!(riptering::keyagreement::agree_x25519(&[0; 32], &alice_key).is_err());
     }
 }
 
@@ -420,7 +420,7 @@ fn p384_and_p521_signatures_and_agreement_complete_the_curve_baseline() {
     use p256::elliptic_curve::sec1::ToEncodedPoint;
     use p256::pkcs8::{EncodePrivateKey, EncodePublicKey};
 
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     let p384_a = p384::SecretKey::random(&mut rand::rngs::OsRng);
     let p384_b = p384::SecretKey::random(&mut rand::rngs::OsRng);
     let p384_a_der = p384_a.to_pkcs8_der().unwrap();
@@ -443,13 +443,13 @@ fn p384_and_p521_signatures_and_agreement_complete_the_curve_baseline() {
     let verifier = SoftwareVerifier::new(p384_algorithm, p384_public).unwrap();
     assert!(verifier.verify(b"P-384 baseline", &signature).unwrap());
     assert!(!verifier.verify(b"tampered", &signature).unwrap());
-    let p384_ab = kryptering::keyagreement::agree(
+    let p384_ab = riptering::keyagreement::agree(
         EcCurve::P384,
         p384_b.public_key().to_encoded_point(false).as_bytes(),
         &p384_a_key,
     )
     .unwrap();
-    let p384_ba = kryptering::keyagreement::agree(
+    let p384_ba = riptering::keyagreement::agree(
         EcCurve::P384,
         p384_a.public_key().to_encoded_point(false).as_bytes(),
         &p384_b_key,
@@ -479,13 +479,13 @@ fn p384_and_p521_signatures_and_agreement_complete_the_curve_baseline() {
     let verifier = SoftwareVerifier::new(p521_algorithm, p521_public).unwrap();
     assert!(verifier.verify(b"P-521 baseline", &signature).unwrap());
     assert!(!verifier.verify(b"tampered", &signature).unwrap());
-    let p521_ab = kryptering::keyagreement::agree(
+    let p521_ab = riptering::keyagreement::agree(
         EcCurve::P521,
         p521_b.public_key().to_encoded_point(false).as_bytes(),
         &p521_a_key,
     )
     .unwrap();
-    let p521_ba = kryptering::keyagreement::agree(
+    let p521_ba = riptering::keyagreement::agree(
         EcCurve::P521,
         p521_a.public_key().to_encoded_point(false).as_bytes(),
         &p521_b_key,
@@ -496,12 +496,12 @@ fn p384_and_p521_signatures_and_agreement_complete_the_curve_baseline() {
 
 #[test]
 fn unsupported_operations_are_reported_before_key_parsing() {
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     #[cfg(feature = "aws-lc")]
     {
-        let operation = kryptering::Operation::Wrap(KeyWrapAlgorithm::AesKw(AesKeySize::Aes192));
-        assert!(!kryptering::supports(operation).unwrap());
-        let error = kryptering::keywrap::wrap(
+        let operation = riptering::Operation::Wrap(KeyWrapAlgorithm::AesKw(AesKeySize::Aes192));
+        assert!(!riptering::supports(operation).unwrap());
+        let error = riptering::keywrap::wrap(
             KeyWrapAlgorithm::AesKw(AesKeySize::Aes192),
             b"not even a valid key",
             b"not valid key data",
@@ -509,7 +509,7 @@ fn unsupported_operations_are_reported_before_key_parsing() {
         .unwrap_err();
         assert!(matches!(
             error,
-            kryptering::Error::UnsupportedAlgorithm {
+            riptering::Error::UnsupportedAlgorithm {
                 operation: actual,
                 ..
             } if actual == operation
@@ -518,9 +518,9 @@ fn unsupported_operations_are_reported_before_key_parsing() {
 
     #[cfg(feature = "rustcrypto")]
     {
-        let operation = kryptering::Operation::Pbkdf2(HashAlgorithm::Sha3_256);
-        assert!(!kryptering::supports(operation).unwrap());
-        let error = kryptering::kdf::pbkdf2_derive(
+        let operation = riptering::Operation::Pbkdf2(HashAlgorithm::Sha3_256);
+        assert!(!riptering::supports(operation).unwrap());
+        let error = riptering::kdf::pbkdf2_derive(
             b"password",
             &Pbkdf2Params {
                 hash: HashAlgorithm::Sha3_256,
@@ -532,7 +532,7 @@ fn unsupported_operations_are_reported_before_key_parsing() {
         .unwrap_err();
         assert!(matches!(
             error,
-            kryptering::Error::UnsupportedAlgorithm {
+            riptering::Error::UnsupportedAlgorithm {
                 operation: actual,
                 ..
             } if actual == operation
@@ -543,9 +543,9 @@ fn unsupported_operations_are_reported_before_key_parsing() {
     {
         // AWS-LC implements SHA-1 PBKDF2, but FIPS does not approve it. The
         // refusal comes before the SP 800-132 parameter checks would fail.
-        let operation = kryptering::Operation::Pbkdf2(HashAlgorithm::Sha1);
-        assert!(!kryptering::supports(operation).unwrap());
-        let error = kryptering::kdf::pbkdf2_derive(
+        let operation = riptering::Operation::Pbkdf2(HashAlgorithm::Sha1);
+        assert!(!riptering::supports(operation).unwrap());
+        let error = riptering::kdf::pbkdf2_derive(
             b"password",
             &Pbkdf2Params {
                 hash: HashAlgorithm::Sha1,
@@ -557,7 +557,7 @@ fn unsupported_operations_are_reported_before_key_parsing() {
         .unwrap_err();
         assert!(matches!(
             error,
-            kryptering::Error::UnsupportedAlgorithm {
+            riptering::Error::UnsupportedAlgorithm {
                 operation: actual,
                 ..
             } if actual == operation
@@ -567,7 +567,7 @@ fn unsupported_operations_are_reported_before_key_parsing() {
 
 #[test]
 fn ecdsa_signing_capabilities_are_also_verifiable() {
-    kryptering::initialize_backend().expect("provider initialization");
+    riptering::initialize_backend().expect("provider initialization");
     // Every provider, FIPS included, signs each curve with its matched
     // digest, so the loop below cannot pass without checking anything.
     for (curve, hash) in [
@@ -577,7 +577,7 @@ fn ecdsa_signing_capabilities_are_also_verifiable() {
     ] {
         let algorithm = SignatureAlgorithm::Ecdsa(curve, hash);
         assert!(
-            kryptering::supports(kryptering::Operation::Sign(algorithm)).unwrap(),
+            riptering::supports(riptering::Operation::Sign(algorithm)).unwrap(),
             "matched-pair ECDSA signing unsupported for {algorithm:?}"
         );
     }
@@ -595,9 +595,9 @@ fn ecdsa_signing_capabilities_are_also_verifiable() {
             // cross curve/digest pairs XML-DSig produces (e.g. P-384 with
             // SHA-256) but only signs with its fixed matched pairs.
             let algorithm = SignatureAlgorithm::Ecdsa(curve, hash);
-            if kryptering::supports(kryptering::Operation::Sign(algorithm)).unwrap() {
+            if riptering::supports(riptering::Operation::Sign(algorithm)).unwrap() {
                 assert!(
-                    kryptering::supports(kryptering::Operation::Verify(algorithm)).unwrap(),
+                    riptering::supports(riptering::Operation::Verify(algorithm)).unwrap(),
                     "signable but unverifiable ECDSA capability for {algorithm:?}"
                 );
             }

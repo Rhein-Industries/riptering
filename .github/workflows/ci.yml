@@ -1,151 +1,185 @@
 name: CI
 
+# Tests every document provider (RustCrypto and AWS-LC), PKCS#11 against
+# SoftHSM2, the Linux-only AWS-LC FIPS build and macOS, on GitHub-hosted
+# runners only.
+#
+# Publishing to crates.io is manual for now: a Rhein Industries maintainer
+# runs `cargo publish` from a tagged commit after this workflow passes.
+# kryptering's tag-triggered Publish workflow was removed in the fork because
+# it relied on the upstream author's crates.io credentials.
+
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   workflow_dispatch:
-
-# Cancel superseded runs on the same ref (e.g. re-pushes to a PR branch).
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  schedule:
+    # Weekly run catches toolchain, runner image and dependency drift.
+    - cron: '47 4 * * 1'
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  # Keep in sync with `rust-version` in Cargo.toml.
+  MSRV: "1.88.0"
 
 jobs:
-  rust:
-    name: Rust (fmt + clippy + test, feature matrix)
-    runs-on: ubuntu-latest
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          toolchain: stable
-          components: rustfmt, clippy
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: ${{ env.MSRV }}
+          components: rustfmt
+      - run: cargo fmt --all -- --check
 
-      - name: Install AWS-LC native build dependencies
+  linux:
+    name: Linux providers (Rust ${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # The MSRV run is the full gate (clippy -D warnings and every test).
+        # The stable run repeats the tests only, so a new clippy lint on a
+        # new stable release does not break the build on its own.
+        include:
+          - toolchain: "1.88.0"
+            lint: true
+          - toolchain: stable
+            lint: false
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes build-essential cmake clang libclang-dev perl pkg-config
-
-      - name: Cargo cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-
-      - name: cargo fmt
-        run: cargo fmt --all -- --check
-
-      - name: cargo clippy (default RustCrypto + PKCS#11)
-        run: cargo clippy --locked --all-targets -- -D warnings
-
-      - name: cargo clippy (RustCrypto complete)
-        run: cargo clippy --locked --no-default-features --features rustcrypto,legacy,post-quantum --all-targets -- -D warnings
-
-      - name: cargo clippy (AWS-LC)
-        run: cargo clippy --locked --no-default-features --features aws-lc,legacy --all-targets -- -D warnings
-
-      # Unit tests — pure cryptography paths, no HSM. The `pkcs11` feature
-      # only requires libloading at build time; no runtime PKCS#11 module
-      # is needed because kryptering's HSM tests live in downstream
-      # integration suites (e.g. bergshamra) and gate behind softhsm.
-      - name: cargo test (default RustCrypto + PKCS#11)
-        run: cargo test --locked --lib
-
-      - name: provider baseline (RustCrypto)
-        run: cargo test --locked --test provider_baseline
-
-      - name: cargo test (RustCrypto complete)
-        run: cargo test --locked --no-default-features --features rustcrypto,legacy,post-quantum --lib
-
-      - name: cargo test (AWS-LC)
-        run: cargo test --locked --no-default-features --features aws-lc,legacy --lib
-
-      - name: provider baseline (AWS-LC)
-        run: cargo test --locked --no-default-features --features aws-lc,legacy --test provider_baseline
-
-      - name: TLS client config (ring)
-        run: cargo test --locked --no-default-features --features rustcrypto,tls-ring --test tls_provider
-
-      - name: TLS client config (AWS-LC)
-        run: cargo test --locked --no-default-features --features aws-lc,tls-aws-lc --test tls_provider
-
-      - name: AWS-LC excludes RustCrypto primitives
+          # SoftHSM2 is the token behind the PKCS#11 integration test.
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates cmake clang pkg-config softhsm2
+      - name: Clippy (every provider feature set)
+        if: matrix.lint
         run: |
-          cargo tree --no-default-features --features aws-lc,legacy -e normal --prefix none > /tmp/kryptering-aws-tree.txt
-          forbidden='^(rsa|dsa|ecdsa|p256|p384|p521|ed25519-dalek|x25519-dalek|aes |aes-gcm|cbc |des |sha1 |sha2 |sha3 |hmac |ml-dsa|slh-dsa|ml-kem) v'
-          if rg "$forbidden" /tmp/kryptering-aws-tree.txt; then
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --features post-quantum,legacy -- -D warnings
+          cargo clippy --locked --all-targets --no-default-features --features aws-lc,legacy,pkcs11 -- -D warnings
+          cargo clippy --locked --all-targets --no-default-features --features aws-lc,pkcs11 -- -D warnings
+      - name: RustCrypto provider
+        run: |
+          cargo test --locked
+          cargo test --locked --features post-quantum,legacy
+      - name: AWS-LC provider
+        run: |
+          cargo test --locked --no-default-features --features aws-lc
+          cargo test --locked --no-default-features --features aws-lc,legacy
+      - name: TLS client configuration
+        run: |
+          cargo test --locked --no-default-features --features rustcrypto,tls-ring --test tls_provider
+          cargo test --locked --no-default-features --features aws-lc,tls-aws-lc --test tls_provider
+      - name: PKCS#11 backend against SoftHSM2
+        run: |
+          # Debian and Ubuntu ship the module in libsofthsm2 (pulled in by
+          # softhsm2); look it up instead of hard-coding /usr/lib/softhsm.
+          module=""
+          while IFS= read -r path; do
+            if [[ -f "$path" ]]; then
+              module="$path"
+              break
+            fi
+          done < <(dpkg -L libsofthsm2 softhsm2 2>/dev/null | grep -E '/libsofthsm2\.so$' || true)
+          if [[ -z "$module" ]]; then
+            echo "libsofthsm2.so not found in the installed SoftHSM2 packages" >&2
+            exit 1
+          fi
+          echo "Using SoftHSM2 module $module"
+          export RIPTERING_TEST_SOFTHSM2_MODULE="$module"
+          cargo test --locked --test pkcs11_softhsm -- --nocapture
+          cargo test --locked --no-default-features --features aws-lc,pkcs11 --test pkcs11_softhsm -- --nocapture
+      - name: AWS-LC builds exclude RustCrypto primitives
+        if: matrix.lint
+        run: |
+          tree="$RUNNER_TEMP/riptering-aws-lc-tree.txt"
+          cargo tree --locked --no-default-features --features aws-lc,legacy,pkcs11 -e normal --prefix none > "$tree"
+          forbidden='^(rsa|dsa|ecdsa|p256|p384|p521|ed25519-dalek|x25519-dalek|aes|aes-gcm|aes-kw|cbc|des|sha1|sha2|sha3|hmac|hkdf|pbkdf2|md-5|ripemd|ml-dsa|slh-dsa|ml-kem) v'
+          if grep -E "$forbidden" "$tree"; then
             echo "::error::AWS-LC build includes a RustCrypto primitive implementation"
             exit 1
           fi
-
-      - name: cargo doc
-        run: cargo doc --locked --no-default-features --features rustcrypto,legacy,post-quantum,pkcs11,tls-ring --no-deps
-        env:
-          RUSTDOCFLAGS: "-D warnings"
-
-      - name: invalid provider combinations fail
+      - name: Invalid provider combinations fail to compile
+        if: matrix.lint
         run: |
           if cargo check --locked --no-default-features --features rustcrypto,aws-lc; then
-            echo "multiple document providers unexpectedly compiled" >&2
+            echo "::error::multiple document providers unexpectedly compiled"
             exit 1
           fi
           if cargo check --locked --no-default-features; then
-            echo "missing document provider unexpectedly compiled" >&2
+            echo "::error::missing document provider unexpectedly compiled"
             exit 1
           fi
           if cargo check --locked --no-default-features --features rustcrypto,tls-ring,tls-aws-lc; then
-            echo "multiple TLS providers unexpectedly compiled" >&2
+            echo "::error::multiple TLS providers unexpectedly compiled"
             exit 1
           fi
-
-  msrv:
-    name: Rust 1.88 MSRV
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
-        with:
-          toolchain: 1.88.0
-      - run: cargo check --locked
+      - name: API documentation
+        if: matrix.lint
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: |
+          cargo doc --locked --no-deps
+          cargo doc --locked --no-deps --no-default-features --features rustcrypto,legacy,post-quantum,pkcs11,tls-ring
+          cargo doc --locked --no-deps --no-default-features --features aws-lc,legacy,pkcs11,tls-aws-lc
 
   fips:
-    name: FIPS (AWS-LC, ${{ matrix.runner }})
+    name: AWS-LC FIPS provider (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          toolchain: stable
-      - name: Install AWS-LC native build dependencies
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: ${{ env.MSRV }}
+          components: clippy
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes build-essential cmake clang libclang-dev perl pkg-config
-      - name: Install Go for the AWS-LC FIPS build
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version: stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
-      - name: Compile provider pairing
-        run: cargo check --locked --no-default-features --features fips,tls-aws-lc
-      - name: Verify mandatory initialization fails closed
-        run: cargo test --locked --no-default-features --features fips,tls-aws-lc --test fips_initialization cryptography_fails_closed_before_explicit_initialization
-      - name: Attest selected FIPS document and TLS providers
-        run: cargo test --locked --no-default-features --features fips,tls-aws-lc --test fips_attestation
-      - name: Run FIPS provider known-answer tests
-        run: cargo test --locked --no-default-features --features fips,tls-aws-lc --test fips_known_answers
-      - name: Invalid FIPS provider combinations fail closed
+          # Go is required to build the AWS-LC FIPS module.
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates cmake clang golang-go pkg-config
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --no-default-features --features fips,tls-aws-lc,pkcs11 -- -D warnings
+      - name: Tests (initialization, attestation, known answers, parity, baseline)
+        run: cargo test --locked --no-fail-fast --no-default-features --features fips,tls-aws-lc
+      - name: Invalid FIPS provider combinations fail to compile
         run: |
           if cargo check --locked --no-default-features --features rustcrypto,fips; then
             echo "::error::FIPS unexpectedly compiled with RustCrypto document crypto"
@@ -155,3 +189,32 @@ jobs:
             echo "::error::FIPS unexpectedly compiled with ring TLS"
             exit 1
           fi
+
+  macos:
+    name: macOS (default and non-FIPS AWS-LC)
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: ${{ env.MSRV }}
+          components: clippy
+      - name: Clippy
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --no-default-features --features aws-lc,legacy,pkcs11 -- -D warnings
+      - name: RustCrypto provider
+        run: |
+          cargo test --locked
+          cargo test --locked --features post-quantum,legacy
+      - name: AWS-LC provider (non-FIPS)
+        run: |
+          cargo test --locked --no-default-features --features aws-lc
+          cargo test --locked --no-default-features --features aws-lc,legacy
+          cargo test --locked --no-default-features --features aws-lc,tls-aws-lc --test tls_provider

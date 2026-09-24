@@ -1,8 +1,93 @@
 # Changelog
 
-## 0.5.0 - [unreleased]
+riptering is Rhein Industries' maintained fork of
+[kryptering](https://github.com/kushaldas/kryptering) by Kushal Das. Entries
+from 0.6.0 on describe riptering. The history of kryptering up to 0.5.0, the
+release riptering was forked from, is kept unchanged below.
 
-### Added
+## 0.6.0 — first riptering release
+
+Not yet published to crates.io. Changes relative to kryptering 0.5.0
+(upstream commit `cb733df`):
+
+### Changed
+
+- **Breaking:** the crate is renamed `riptering` (`use riptering::...`).
+  Existing code can keep its paths with
+  `kryptering = { package = "riptering", version = "0.6" }`. Error messages
+  name riptering (for example "riptering requires at least 2048 bits"), and
+  the SoftHSM2 integration test reads `RIPTERING_TEST_SOFTHSM2_MODULE`
+  instead of `KRYPTERING_TEST_SOFTHSM2_MODULE`.
+- **Breaking (AWS-LC provider):** `Pbkdf2Params::recommended` takes the hash
+  algorithm first, `recommended(hash, salt, key_length)`, matching the
+  RustCrypto provider, and picks the OWASP iteration count for that hash.
+- The non-FIPS AWS-LC provider also builds on macOS x86_64/aarch64. FIPS
+  builds stay Linux-only; this is not a claim of FIPS certification.
+- Provider parity: the RustCrypto and AWS-LC providers accept the same ECDSA
+  signature encodings, reject RSA keys below 2048 bits at import, restrict
+  raw key import to symmetric families and check key types for X25519/ECDH.
+  AWS-LC implements raw `ecdh_x25519` and verifies the cross curve/digest
+  ECDSA pairs XML-DSig produces.
+- Package metadata points at <https://github.com/Rhein-Industries/riptering>;
+  LICENSE keeps Kushal Das's copyright line and adds Rhein Industries' line
+  for the fork's modifications.
+
+### Security
+
+- FIPS (AWS-LC): PBKDF2, HKDF and ConcatKDF use the AWS-LC module
+  implementations; PBKDF2 enforces the SP 800-132 minimums (1000
+  iterations, 112-bit passwords); AES-128/256-GCM nonces are generated
+  inside the module; AES-192-GCM encryption and SHA-224 PBKDF2/HKDF are no
+  longer reported as approved.
+- RustCrypto: AES-CBC rejects IV-only input, AES-KW enforces RFC 3394
+  lengths, the RSA-PSS salt length is bounded, DH group parameters and
+  exponents are validated, post-quantum key pairs are checked on import, and
+  more secret intermediates are zeroized.
+- PKCS#11: concurrent sessions on one token; a session joining an existing
+  login must present the PIN riptering logged in with, and three mismatches
+  lock further joins until riptering's sessions on the token close; raw-byte
+  PINs (`open_session_bytes`); KEK length checks; AES key wrap through
+  `C_WrapKey`/`C_UnwrapKey` where the token only offers those; the FIPS ECDH
+  curve is read from `CKA_EC_PARAMS`; derived ECDH secrets are session
+  objects that are always destroyed.
+- Raise the `rustls` minimum to 0.23.45 (RUSTSEC-2026-0285) and the
+  `cryptoki` minimum to 0.12.1 (RUSTSEC-2026-0286). `Cargo.lock` moves to
+  rustls 0.23.45, rustls-webpki 0.103.15, cryptoki 0.12.1, and — because
+  rustls 0.23.45 requires aws-lc-rs 1.18 — aws-lc-rs 1.18.1, aws-lc-sys
+  0.45.0 and aws-lc-fips-sys 0.14.2. The lockfile now also records the
+  `cryptoki-sys` dev-dependency, so `--locked` builds succeed.
+- `.cargo/audit.toml` drops the RUSTSEC-2026-0097 ignore: the locked rand
+  0.8.7 is patched. RUSTSEC-2023-0071 (rsa, no fixed release) stays
+  ignored with a re-checked justification.
+
+### Testing and CI
+
+- `tests/provider_parity.rs` runs identical cases against every provider,
+  including FIPS, where unapproved operations must be refused as
+  unsupported. The baseline and parity suites and the unit tests run under
+  FIPS with explicit backend initialization.
+- `tests/pkcs11_softhsm.rs` exercises the PKCS#11 backend end to end
+  against a private SoftHSM2 token.
+- GitHub Actions on GitHub-hosted runners: format, clippy and tests for
+  every provider on Rust 1.88 (MSRV) and stable, PKCS#11 against SoftHSM2,
+  the Linux FIPS build, and macOS for the default and non-FIPS AWS-LC
+  providers. Upstream's tag-triggered crates.io publish workflow is removed;
+  publishing is manual for now. The weekly `cargo audit` run is kept.
+- `clippy -D warnings` is clean on Rust 1.88 (inlined format arguments that
+  clippy 1.88 flags), and `cargo doc` is warning-free without the
+  `post-quantum` feature (a doc link to the feature-gated
+  `export_composite_public` no longer breaks).
+- Added `SECURITY.md` and `CONTRIBUTING.md`.
+
+## kryptering history (upstream, up to 0.5.0)
+
+The entries below are kryptering's own changelog, by Kushal Das and the
+kryptering contributors, as of the fork point. Headings are demoted one
+level; the text is unchanged.
+
+### 0.5.0 - [unreleased]
+
+#### Added
 
 - Compile-time RustCrypto and AWS-LC document providers, with independent
   ring/AWS-LC TLS provider selection.
@@ -28,7 +113,7 @@
   NIST ACVP known-answer vectors for key generation (all variants) and
   encapsulation (ML-KEM-768) pass byte-for-byte.
 
-### Changed
+#### Changed
 
 - **Breaking:** digest and streaming digest creation are fallible, and software
   signing/key-transport APIs accept opaque provider keys.
@@ -42,7 +127,7 @@
   resolved dependency graph.
 - FIPS mode currently selects AWS-LC exclusively.
 
-### Security
+#### Security
 
 - PKCS#11 signing, verification, key transport, key wrap, and cipher
   operations now enforce the FIPS algorithm allowlist via
@@ -74,9 +159,9 @@
   1024 to 2048 bits to match the import path's `RSA_PKCS1_2048_8192_*`
   floor, removing an inconsistent threshold between the two code paths.
 
-## 0.4.1 - [2026-07-01]
+### 0.4.1 - [2026-07-01]
 
-### Changed
+#### Changed
 
 - Bump the `cipher 0.5` wave to current stable finals: `aes 0.9`,
   `aes-gcm 0.11`, `aes-kw 0.3`, `cbc 0.2`, and `des 0.9` (legacy). Migrate
@@ -86,12 +171,12 @@
   key-wrap known-answer vectors still pass byte-for-byte.
 - Refresh compatible dependency versions in `Cargo.lock`.
 
-### Security
+#### Security
 
 - Update `crypto-bigint` `0.7.3 -> 0.7.5`, clearing a `cargo audit` warning
   for the yanked `0.7.3` release.
 
-### Notes
+#### Notes
 
 - Pin `generic-array` to `0.14.7` (the last release without the
   `from_slice` deprecation) to keep `clippy -D warnings` clean while the
@@ -100,9 +185,9 @@
   wave has no stable finals yet (RSA, ECDSA, the P-curves, and the dalek
   crates are pre-release only). See `docs/ecosystem.md`.
 
-## 0.4.0 - [2026-06-27]
+### 0.4.0 - [2026-06-27]
 
-### Security
+#### Security
 
 - Reject ambiguous PKCS#11 token and object selection instead of silently using
   the first match.
@@ -113,7 +198,7 @@
   derivation.
 - Reject 3DES-CBC IV-only ciphertext.
 
-### Changed
+#### Changed
 
 - Refresh compatible dependency versions in `Cargo.lock`.
 - Keep `rsa` on `0.9.10`; no stable patched upgrade is available for the tracked RustSec advisory.
