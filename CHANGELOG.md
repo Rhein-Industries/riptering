@@ -5,6 +5,15 @@ riptering is Rhein Industries' maintained fork of
 from 0.6.0 on describe riptering. The history of kryptering up to 0.5.0, the
 release riptering was forked from, is kept unchanged below.
 
+## 0.6.2 — 2026-09-24
+
+- RSA keys below 2048 bits are refused when they are used (signing,
+  verification, key transport) instead of at import, on both providers, as
+  kryptering did with AWS-LC. Callers get the "N-bit RSA key" error at the
+  point of use; XML-DSig callers that skip unusable inline keys now see that
+  error instead of a missing-key error. FIPS builds still refuse them at
+  import. RustCrypto with `legacy` still accepts them.
+
 ## 0.6.1 — 2026-09-24
 
 - The RustCrypto provider accepts RSA keys below 2048 bits again when the

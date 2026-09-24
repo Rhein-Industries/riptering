@@ -45,7 +45,6 @@ impl SoftwareKey {
                 let private = rsa::RsaPrivateKey::from_pkcs8_der(&der)
                     .map_err(|e| Error::Key(format!("RSA PKCS#8 import failed: {e}")))?;
                 let public = private.to_public_key();
-                enforce_rsa_min_bits(Operation::KeyImport(algorithm), &public)?;
                 RustCryptoKey::Rsa {
                     private: Some(private),
                     public,
@@ -123,7 +122,6 @@ impl SoftwareKey {
                 use rsa::pkcs8::DecodePublicKey;
                 let public = rsa::RsaPublicKey::from_public_key_der(der)
                     .map_err(|e| Error::Key(format!("RSA SPKI import failed: {e}")))?;
-                enforce_rsa_min_bits(Operation::KeyImport(algorithm), &public)?;
                 RustCryptoKey::Rsa {
                     private: None,
                     public,
@@ -688,41 +686,16 @@ mod tests {
         assert!(Arc::ptr_eq(&key.0, &clone.0));
     }
 
-    #[cfg(feature = "legacy")]
     #[test]
-    fn legacy_accepts_rsa_keys_below_2048_bits() {
+    fn short_rsa_keys_import_and_are_checked_when_used() {
+        // The 2048-bit minimum applies when a key signs, verifies or
+        // transports a key, so callers get the key-size error at that point.
         use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
         let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 1024).unwrap();
         let pkcs8 = private.to_pkcs8_der().unwrap();
         let spki = private.to_public_key().to_public_key_der().unwrap();
         assert!(SoftwareKey::from_pkcs8_der(KeyAlgorithm::Rsa, pkcs8.as_bytes()).is_ok());
         assert!(SoftwareKey::from_spki_der(KeyAlgorithm::Rsa, spki.as_bytes()).is_ok());
-    }
-
-    #[cfg(not(feature = "legacy"))]
-    #[test]
-    fn rejects_rsa_keys_below_2048_bits_at_import() {
-        use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
-        let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 1024).unwrap();
-        let pkcs8 = private.to_pkcs8_der().unwrap();
-        let spki = private.to_public_key().to_public_key_der().unwrap();
-
-        for error in [
-            SoftwareKey::from_pkcs8_der(KeyAlgorithm::Rsa, pkcs8.as_bytes()).unwrap_err(),
-            SoftwareKey::from_spki_der(KeyAlgorithm::Rsa, spki.as_bytes()).unwrap_err(),
-        ] {
-            assert!(
-                matches!(
-                    error,
-                    Error::UnsupportedAlgorithm {
-                        operation: Operation::KeyImport(KeyAlgorithm::Rsa),
-                        ref algorithm,
-                        ..
-                    } if algorithm.contains("1024-bit RSA key")
-                ),
-                "got {error:?}"
-            );
-        }
     }
 
     #[cfg(feature = "post-quantum")]

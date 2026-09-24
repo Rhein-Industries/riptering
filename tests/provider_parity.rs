@@ -193,22 +193,42 @@ fn ecdsa_verifies_cross_curve_digest_pairs() {
 }
 
 #[test]
-fn rsa_keys_below_2048_bits_are_rejected() {
+fn rsa_keys_below_2048_bits_are_refused_when_used() {
+    use riptering::{KeyTransportAlgorithm, OaepConfig};
     use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
 
     riptering::initialize_backend().expect("provider initialization");
     let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 1024).unwrap();
     let spki = private.to_public_key().to_public_key_der().unwrap();
     let pkcs8 = private.to_pkcs8_der().unwrap();
-    let spki = SoftwareKey::from_spki_der(KeyAlgorithm::Rsa, spki.as_bytes());
-    let pkcs8 = SoftwareKey::from_pkcs8_der(KeyAlgorithm::Rsa, pkcs8.as_bytes());
-    // The one intended difference: RustCrypto with `legacy` accepts short RSA
-    // keys for historical interoperability; AWS-LC and FIPS never do.
-    if cfg!(all(feature = "rustcrypto", feature = "legacy")) {
-        assert!(spki.is_ok() && pkcs8.is_ok());
-    } else {
-        assert!(spki.is_err() && pkcs8.is_err());
+    let public = SoftwareKey::from_spki_der(KeyAlgorithm::Rsa, spki.as_bytes());
+    let private = SoftwareKey::from_pkcs8_der(KeyAlgorithm::Rsa, pkcs8.as_bytes());
+    if cfg!(feature = "fips") {
+        // FIPS builds refuse short RSA keys already at import.
+        assert!(public.is_err() && private.is_err());
+        return;
     }
+    let (public, private) = (public.unwrap(), private.unwrap());
+    let algorithm = SignatureAlgorithm::RsaPkcs1v15(HashAlgorithm::Sha256);
+    // The one intended difference: RustCrypto with `legacy` uses short RSA
+    // keys for historical interoperability; AWS-LC never does.
+    let usable = cfg!(all(feature = "rustcrypto", feature = "legacy"));
+    assert_eq!(
+        SoftwareSigner::new(algorithm, private.clone()).is_ok(),
+        usable
+    );
+    let verified = SoftwareVerifier::new(algorithm, public.clone())
+        .and_then(|verifier| verifier.verify(b"message", &[0; 128]));
+    assert_eq!(verified.is_ok(), usable, "{verified:?}");
+    if !usable {
+        assert!(verified
+            .unwrap_err()
+            .to_string()
+            .contains("1024-bit RSA key"));
+    }
+    let oaep = KeyTransportAlgorithm::RsaOaep(OaepConfig::default());
+    let transported = riptering::keytransport::kt_encrypt(oaep, &public, &[0x42; 16], None);
+    assert_eq!(transported.is_ok(), usable, "{transported:?}");
 }
 
 #[test]

@@ -27,6 +27,12 @@ impl SoftwareSigner {
         }
         require_supported(Operation::Sign(algorithm))?;
         validate_signing_key(algorithm, &key)?;
+        if matches!(
+            algorithm,
+            SignatureAlgorithm::RsaPkcs1v15(_) | SignatureAlgorithm::RsaPss(_)
+        ) {
+            enforce_rsa_key_size(Operation::Sign(algorithm), &key)?;
+        }
         Ok(Self { algorithm, key })
     }
 }
@@ -132,6 +138,23 @@ fn aws_lc_sign(algorithm: SignatureAlgorithm, private_der: &[u8], data: &[u8]) -
             format!("{algorithm:?}"),
         )),
     }
+}
+
+/// Reject RSA keys below 2048 bits when they are used, with the same error
+/// verification reports. The RustCrypto provider accepts shorter keys only
+/// with the `legacy` feature; AWS-LC never does.
+fn enforce_rsa_key_size(operation: Operation, key: &SoftwareKey) -> Result<()> {
+    let bits = key
+        .public_der()
+        .and_then(crate::key::rsa_spki_modulus_bits)
+        .ok_or_else(|| Error::Key("RSA key is not a valid SubjectPublicKeyInfo".into()))?;
+    if bits < 2048 {
+        return Err(Error::unsupported(
+            operation,
+            format!("{bits}-bit RSA key (riptering requires at least 2048 bits)"),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_signing_key(algorithm: SignatureAlgorithm, key: &SoftwareKey) -> Result<()> {
@@ -717,6 +740,7 @@ pub mod keytransport {
         if public_key.algorithm() != KeyAlgorithm::Rsa {
             return Err(Error::Key("RSA public key required".into()));
         }
+        super::enforce_rsa_key_size(Operation::TransportEncrypt(algorithm), public_key)?;
         let public_der = public_key
             .public_der()
             .ok_or_else(|| Error::Key("RSA public key is missing".into()))?;
@@ -734,6 +758,7 @@ pub mod keytransport {
         if private_key.algorithm() != KeyAlgorithm::Rsa {
             return Err(Error::Key("RSA private key required".into()));
         }
+        super::enforce_rsa_key_size(Operation::TransportDecrypt(algorithm), private_key)?;
         let private_der = private_key
             .private_der()
             .ok_or_else(|| Error::Key("RSA private key is missing".into()))?;

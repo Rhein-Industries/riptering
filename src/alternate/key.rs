@@ -216,15 +216,14 @@ impl SoftwareKey {
     }
 }
 
-/// Enforce size-dependent import policy after parsing the neutral SPKI.
+/// Enforce size-dependent FIPS import policy after parsing the neutral SPKI.
 ///
 /// EC imports are already restricted by [`KeyAlgorithm`] to P-256, P-384,
 /// and P-521. RSA needs an additional modulus-size check because its size is
-/// encoded in the key rather than the algorithm enum. AWS-LC's SPKI parser
-/// only checks the size when a key is used, so import checks it explicitly
-/// to reject the same keys as the RustCrypto provider.
+/// encoded in the key rather than the algorithm enum. Outside FIPS builds the
+/// 2048-bit minimum applies when a key is used, as in the RustCrypto provider.
 fn enforce_key_strength(algorithm: KeyAlgorithm, public_der: &[u8]) -> Result<()> {
-    if algorithm != KeyAlgorithm::Rsa {
+    if !cfg!(feature = "fips") || algorithm != KeyAlgorithm::Rsa {
         return Ok(());
     }
     let bits = rsa_spki_modulus_bits(public_der)

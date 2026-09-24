@@ -68,9 +68,11 @@ signature verification uses the key.
 
 Both providers accept the same ECDSA signature encodings on verification:
 fixed-width r||s, r||s with zero-padded or stripped components, and DER.
-RustCrypto enforces the same 2048-bit RSA floor as AWS-LC, except with the
-`legacy` feature, which accepts shorter RSA keys for interoperability with
-historical signatures and encrypted documents. AWS-LC never accepts them.
+Both providers import RSA keys below 2048 bits but refuse to sign, verify or
+transport keys with them, reporting the key size. The RustCrypto provider
+uses them only with the `legacy` feature, for interoperability with
+historical signatures and encrypted documents; AWS-LC never does, and FIPS
+builds refuse them already at import.
 
 In a `fips` build:
 
