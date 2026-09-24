@@ -6,8 +6,9 @@ name: CI
 #
 # Publishing to crates.io is manual for now: a Rhein Industries maintainer
 # runs `cargo publish` from a tagged commit after this workflow passes.
-# kryptering's tag-triggered Publish workflow was removed in the fork because
-# it relied on the upstream author's crates.io credentials.
+# kryptering's tag-triggered Publish workflow was removed in the fork: it used
+# crates.io trusted publishing set up for the kryptering crate, and riptering
+# has no trusted publisher configured yet.
 
 on:
   push:
