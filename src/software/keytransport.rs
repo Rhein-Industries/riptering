@@ -306,6 +306,7 @@ mod tests {
         assert_eq!(decrypted, key_data);
     }
 
+    #[cfg(not(feature = "legacy"))]
     #[test]
     fn rejects_rsa_keys_below_2048_bits() {
         // Import already refuses these; the transport path re-checks so a

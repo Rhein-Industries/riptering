@@ -1385,6 +1385,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "legacy"))]
     #[test]
     fn rsa_keys_below_2048_bits_are_rejected() {
         let algorithm = SignatureAlgorithm::RsaPss(HashAlgorithm::Sha256);

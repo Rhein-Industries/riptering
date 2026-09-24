@@ -200,8 +200,15 @@ fn rsa_keys_below_2048_bits_are_rejected() {
     let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 1024).unwrap();
     let spki = private.to_public_key().to_public_key_der().unwrap();
     let pkcs8 = private.to_pkcs8_der().unwrap();
-    assert!(SoftwareKey::from_spki_der(KeyAlgorithm::Rsa, spki.as_bytes()).is_err());
-    assert!(SoftwareKey::from_pkcs8_der(KeyAlgorithm::Rsa, pkcs8.as_bytes()).is_err());
+    let spki = SoftwareKey::from_spki_der(KeyAlgorithm::Rsa, spki.as_bytes());
+    let pkcs8 = SoftwareKey::from_pkcs8_der(KeyAlgorithm::Rsa, pkcs8.as_bytes());
+    // The one intended difference: RustCrypto with `legacy` accepts short RSA
+    // keys for historical interoperability; AWS-LC and FIPS never do.
+    if cfg!(all(feature = "rustcrypto", feature = "legacy")) {
+        assert!(spki.is_ok() && pkcs8.is_ok());
+    } else {
+        assert!(spki.is_err() && pkcs8.is_err());
+    }
 }
 
 #[test]

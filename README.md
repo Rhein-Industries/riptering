@@ -26,7 +26,8 @@ over PKCS#11 HSMs. Requires Rust 1.88 or later.
   x86_64/aarch64. FIPS stays Linux-only. This is not a claim of FIPS
   certification.
 - **Provider parity.** The RustCrypto and AWS-LC providers accept the same
-  ECDSA signature encodings, reject RSA keys below 2048 bits at import,
+  ECDSA signature encodings, reject RSA keys below 2048 bits at import (RustCrypto accepts them only
+  with `legacy`, for historical interoperability),
   restrict raw key import to symmetric families, check key types for
   X25519/ECDH, and share `Pbkdf2Params::recommended(hash, salt, key_length)`
   (a breaking change for AWS-LC callers, which previously passed no hash).

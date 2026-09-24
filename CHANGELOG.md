@@ -5,6 +5,14 @@ riptering is Rhein Industries' maintained fork of
 from 0.6.0 on describe riptering. The history of kryptering up to 0.5.0, the
 release riptering was forked from, is kept unchanged below.
 
+## 0.6.1 — 2026-09-24
+
+- The RustCrypto provider accepts RSA keys below 2048 bits again when the
+  `legacy` feature is enabled, restoring kryptering's interoperability with
+  historical signatures and encrypted documents (for example the xmlsec
+  interop corpus used by ribergshamra). Without `legacy`, and always with
+  AWS-LC or FIPS, the 2048-bit minimum stays.
+
 ## 0.6.0 — 2026-09-24 — first riptering release
 
 Changes relative to kryptering 0.5.0

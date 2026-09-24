@@ -642,6 +642,12 @@ pub(crate) const MIN_RSA_BITS: usize = 2048;
 /// provider reports, so both providers refuse the same key sizes.
 pub(crate) fn enforce_rsa_min_bits(operation: Operation, public: &rsa::RsaPublicKey) -> Result<()> {
     use rsa::traits::PublicKeyParts;
+    // `legacy` restores interoperability with historical signatures and
+    // encrypted documents that use shorter keys, such as the xmlsec interop
+    // corpus. The AWS-LC provider never accepts them.
+    if cfg!(feature = "legacy") {
+        return Ok(());
+    }
     let bits = public.n().bits();
     if bits < MIN_RSA_BITS {
         return Err(Error::unsupported(
@@ -682,6 +688,18 @@ mod tests {
         assert!(Arc::ptr_eq(&key.0, &clone.0));
     }
 
+    #[cfg(feature = "legacy")]
+    #[test]
+    fn legacy_accepts_rsa_keys_below_2048_bits() {
+        use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 1024).unwrap();
+        let pkcs8 = private.to_pkcs8_der().unwrap();
+        let spki = private.to_public_key().to_public_key_der().unwrap();
+        assert!(SoftwareKey::from_pkcs8_der(KeyAlgorithm::Rsa, pkcs8.as_bytes()).is_ok());
+        assert!(SoftwareKey::from_spki_der(KeyAlgorithm::Rsa, spki.as_bytes()).is_ok());
+    }
+
+    #[cfg(not(feature = "legacy"))]
     #[test]
     fn rejects_rsa_keys_below_2048_bits_at_import() {
         use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
