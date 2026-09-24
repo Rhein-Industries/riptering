@@ -208,15 +208,16 @@ fn rsa_keys_below_2048_bits_are_refused_when_used() {
         assert!(public.is_err() && private.is_err());
         return;
     }
-    let (public, private) = (public.unwrap(), private.unwrap());
+    let public = public.unwrap();
     let algorithm = SignatureAlgorithm::RsaPkcs1v15(HashAlgorithm::Sha256);
     // The one intended difference: RustCrypto with `legacy` uses short RSA
     // keys for historical interoperability; AWS-LC never does.
     let usable = cfg!(all(feature = "rustcrypto", feature = "legacy"));
-    assert_eq!(
-        SoftwareSigner::new(algorithm, private.clone()).is_ok(),
-        usable
-    );
+    match private {
+        Ok(private) => assert_eq!(SoftwareSigner::new(algorithm, private).is_ok(), usable),
+        // AWS-LC's RSA key-pair parser itself refuses short private keys.
+        Err(_) => assert!(!usable && cfg!(feature = "aws-lc")),
+    }
     let verified = SoftwareVerifier::new(algorithm, public.clone())
         .and_then(|verifier| verifier.verify(b"message", &[0; 128]));
     assert_eq!(verified.is_ok(), usable, "{verified:?}");
