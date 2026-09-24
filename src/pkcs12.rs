@@ -227,6 +227,7 @@ mod tests {
 
     #[test]
     fn unsupported_hash_reports_pkcs12_operation() {
+        crate::backend::initialize_backend().expect("backend initialization");
         let error = derive(
             HashAlgorithm::Sha512,
             ID_KEY,

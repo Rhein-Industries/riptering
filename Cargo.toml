@@ -109,3 +109,9 @@ p384 = { version = "0.13", features = ["ecdsa", "ecdh", "pkcs8"] }
 p521 = { version = "0.13", features = ["ecdsa", "ecdh", "pkcs8"] }
 ed25519-dalek = { version = "2.1", features = ["pkcs8", "rand_core"] }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# tests/pkcs11_softhsm.rs gives a SoftHSM2 token a non-UTF-8 user PIN through
+# a raw `C_InitPIN`: cryptoki's safe `Session::init_pin` only takes a UTF-8
+# `AuthPin`. This is the cryptoki-sys release cryptoki 0.12 already links.
+cryptoki-sys = "0.5"

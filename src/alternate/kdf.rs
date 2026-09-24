@@ -274,6 +274,7 @@ mod tests {
 
     #[test]
     fn hkdf_rfc5869_case_1() {
+        crate::backend::initialize_backend().expect("backend initialization");
         let output = hkdf_derive(
             &[0x0b; 22],
             42,

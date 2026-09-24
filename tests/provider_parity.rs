@@ -1,13 +1,14 @@
-#![cfg(not(feature = "fips"))]
 //! Cases that must behave identically under every document provider.
 //!
 //! Each test runs against whichever provider the build selects, so CI runs
-//! this file once per provider feature set.
+//! this file once per provider feature set. FIPS builds run every case too:
+//! approved operations must give the same answers, and operations FIPS does
+//! not approve must be refused as unsupported rather than skipped.
 
 use kryptering::kdf::{HkdfParams, Pbkdf2Params};
 use kryptering::{
-    AesKeySize, EcCurve, HashAlgorithm, KeyAlgorithm, KeyWrapAlgorithm, SignatureAlgorithm,
-    SoftwareKey, SoftwareSigner, SoftwareVerifier,
+    AesKeySize, EcCurve, HashAlgorithm, KeyAlgorithm, KeyWrapAlgorithm, Operation,
+    SignatureAlgorithm, SoftwareKey, SoftwareSigner, SoftwareVerifier,
 };
 use kryptering::{Signer, Verifier};
 
@@ -15,8 +16,21 @@ fn decode(hex_value: &str) -> Vec<u8> {
     hex::decode(hex_value).expect("valid test vector")
 }
 
+/// Assert that `operation` was refused as unsupported, as FIPS builds do for
+/// every operation the module does not approve.
+fn assert_refused<T>(result: kryptering::Result<T>, operation: Operation) {
+    match result {
+        Err(kryptering::Error::UnsupportedAlgorithm {
+            operation: actual, ..
+        }) if actual == operation => {}
+        Err(error) => panic!("{operation:?} failed without being refused: {error}"),
+        Ok(_) => panic!("{operation:?} was accepted"),
+    }
+}
+
 #[test]
 fn raw_symmetric_import_rejects_asymmetric_families() {
+    kryptering::initialize_backend().expect("provider initialization");
     for algorithm in [
         KeyAlgorithm::Rsa,
         KeyAlgorithm::Ec(EcCurve::P256),
@@ -36,29 +50,48 @@ fn raw_symmetric_import_rejects_asymmetric_families() {
 
 #[test]
 fn x25519_agreement_matches_rfc7748_and_checks_key_type() {
+    kryptering::initialize_backend().expect("provider initialization");
     // RFC 7748 §6.1.
     let alice_private = decode("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
     let alice_public = decode("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
     let bob_public = decode("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
     let shared = decode("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
-
-    assert_eq!(
-        kryptering::keyagreement::ecdh_x25519(&bob_public, &alice_private).unwrap(),
-        shared
-    );
-    let alice = SoftwareKey::from_x25519(Some(&alice_private), &alice_public).unwrap();
-    assert_eq!(
-        kryptering::keyagreement::agree_x25519(&bob_public, &alice).unwrap(),
-        shared
-    );
-
     let aes = SoftwareKey::from_symmetric_bytes(KeyAlgorithm::Aes, &[7; 32]).unwrap();
-    assert!(kryptering::keyagreement::agree_x25519(&bob_public, &aes).is_err());
-    assert!(kryptering::keyagreement::ecdh_x25519(&bob_public, &alice_private[..31]).is_err());
+
+    if cfg!(feature = "fips") {
+        // X25519 is not FIPS approved: every entry point refuses the RFC
+        // inputs before inspecting them or the key type.
+        assert_refused(
+            kryptering::keyagreement::ecdh_x25519(&bob_public, &alice_private),
+            Operation::X25519Agreement,
+        );
+        assert_refused(
+            SoftwareKey::from_x25519(Some(&alice_private), &alice_public),
+            Operation::KeyImport(KeyAlgorithm::X25519),
+        );
+        assert_refused(
+            kryptering::keyagreement::agree_x25519(&bob_public, &aes),
+            Operation::X25519Agreement,
+        );
+    } else {
+        assert_eq!(
+            kryptering::keyagreement::ecdh_x25519(&bob_public, &alice_private).unwrap(),
+            shared
+        );
+        let alice = SoftwareKey::from_x25519(Some(&alice_private), &alice_public).unwrap();
+        assert_eq!(
+            kryptering::keyagreement::agree_x25519(&bob_public, &alice).unwrap(),
+            shared
+        );
+
+        assert!(kryptering::keyagreement::agree_x25519(&bob_public, &aes).is_err());
+        assert!(kryptering::keyagreement::ecdh_x25519(&bob_public, &alice_private[..31]).is_err());
+    }
 }
 
 #[test]
 fn signers_reject_keys_of_another_family() {
+    kryptering::initialize_backend().expect("provider initialization");
     let hmac = SoftwareKey::from_symmetric_bytes(KeyAlgorithm::Hmac, b"secret").unwrap();
     for algorithm in [
         SignatureAlgorithm::RsaPkcs1v15(HashAlgorithm::Sha256),
@@ -67,6 +100,17 @@ fn signers_reject_keys_of_another_family() {
     ] {
         assert!(SoftwareSigner::new(algorithm, hmac.clone()).is_err());
         assert!(SoftwareVerifier::new(algorithm, hmac.clone()).is_err());
+    }
+    if cfg!(feature = "fips") {
+        // FIPS refuses Ed25519 itself, before the key family is checked.
+        assert_refused(
+            SoftwareSigner::new(SignatureAlgorithm::Ed25519, hmac.clone()),
+            Operation::Sign(SignatureAlgorithm::Ed25519),
+        );
+        assert_refused(
+            SoftwareVerifier::new(SignatureAlgorithm::Ed25519, hmac),
+            Operation::Verify(SignatureAlgorithm::Ed25519),
+        );
     }
 }
 
@@ -83,6 +127,7 @@ fn p256_der(raw: &[u8]) -> Vec<u8> {
 fn ecdsa_verify_accepts_the_same_encodings() {
     use p256::pkcs8::{EncodePrivateKey, EncodePublicKey};
 
+    kryptering::initialize_backend().expect("provider initialization");
     let private = p256::SecretKey::random(&mut rand::rngs::OsRng);
     let key = SoftwareKey::from_pkcs8_der(
         KeyAlgorithm::Ec(EcCurve::P256),
@@ -124,6 +169,7 @@ fn ecdsa_verifies_cross_curve_digest_pairs() {
     use p384::ecdsa::signature::hazmat::PrehashSigner;
     use p384::pkcs8::EncodePublicKey;
 
+    kryptering::initialize_backend().expect("provider initialization");
     // XML-DSig pairs a P-384 key with whatever digest the URI names.
     let signing = p384::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
     let public = SoftwareKey::from_spki_der(
@@ -150,6 +196,7 @@ fn ecdsa_verifies_cross_curve_digest_pairs() {
 fn rsa_keys_below_2048_bits_are_rejected() {
     use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
 
+    kryptering::initialize_backend().expect("provider initialization");
     let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 1024).unwrap();
     let spki = private.to_public_key().to_public_key_der().unwrap();
     let pkcs8 = private.to_pkcs8_der().unwrap();
@@ -159,6 +206,7 @@ fn rsa_keys_below_2048_bits_are_rejected() {
 
 #[test]
 fn aes_cbc_rejects_iv_only_input() {
+    kryptering::initialize_backend().expect("provider initialization");
     for size in [AesKeySize::Aes128, AesKeySize::Aes256] {
         let key = vec![3; size.key_len()];
         assert!(kryptering::hazmat::aes_cbc::decrypt(size, &key, &[9; 16]).is_err());
@@ -172,6 +220,7 @@ fn aes_cbc_rejects_iv_only_input() {
 
 #[test]
 fn aes_key_wrap_matches_rfc3394_and_rejects_short_input() {
+    kryptering::initialize_backend().expect("provider initialization");
     // RFC 3394 §4.1 and §4.6.
     let kek128 = decode("000102030405060708090A0B0C0D0E0F");
     let kek256 = decode("000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F");
@@ -210,6 +259,7 @@ fn aes_key_wrap_matches_rfc3394_and_rejects_short_input() {
 
 #[test]
 fn kdfs_match_rfc_vectors() {
+    kryptering::initialize_backend().expect("provider initialization");
     // RFC 5869 A.2 (long inputs) and A.3 (no salt, no info).
     let a2 = kryptering::kdf::hkdf_derive(
         &(0u8..=0x4f).collect::<Vec<_>>(),
@@ -240,7 +290,8 @@ fn kdfs_match_rfc_vectors() {
     );
     assert!(kryptering::kdf::hkdf_derive(&[1], 255 * 32 + 1, &HkdfParams::default()).is_err());
 
-    // Cross-checked against Python's hashlib.pbkdf2_hmac.
+    // Cross-checked against Python's hashlib.pbkdf2_hmac. The 8-byte salt and
+    // password are below the SP 800-132 minimums FIPS builds enforce.
     for (hash, len, expected) in [
         (HashAlgorithm::Sha256, 64, "2ecc2dfd549e0925a0e4a0b860368e7492b6e65339188d3e1e9e43799b90ff64cf800fb11ff3602b51ed7c8c766643c32be8af72829b3146642d9ddbdf8d7d6d"),
         (HashAlgorithm::Sha512, 40, "fee75217fa12304834340c9e672f9aaa9cc4bb229a9fd37edcdcd6ae57b42ad8ca5ea636c777c33c"),
@@ -250,6 +301,36 @@ fn kdfs_match_rfc_vectors() {
             &Pbkdf2Params {
                 hash,
                 salt: b"NaCl1234".to_vec(),
+                iteration_count: 1000,
+                key_length: len,
+            },
+        );
+        if cfg!(feature = "fips") {
+            assert!(
+                matches!(
+                    output,
+                    Err(kryptering::Error::Crypto(ref message))
+                        if message.contains("SP 800-132")
+                ),
+                "{hash:?}: {output:?}"
+            );
+        } else {
+            assert_eq!(output.unwrap(), decode(expected), "{hash:?}");
+        }
+    }
+
+    // The same shapes with SP 800-132 compliant parameters (128-bit salt and
+    // password, 1000 iterations), which every provider including FIPS must
+    // derive identically. Cross-checked against Python's hashlib.pbkdf2_hmac.
+    for (hash, len, expected) in [
+        (HashAlgorithm::Sha256, 64, "1e30cde84a0370317564c82ece78efb738195387129590d2fd3d7b48714a40c874de73f494b275b7147b58171cc17101b3cba6a0bd0a3766c839dd7e98f71aed"),
+        (HashAlgorithm::Sha512, 40, "20ae6a68e7f944784e186fa29c12c6ae0926c736f4cdb5f025becc9c70a0e12cf39145acd1ad6113"),
+    ] {
+        let output = kryptering::kdf::pbkdf2_derive(
+            b"PasswordPassword",
+            &Pbkdf2Params {
+                hash,
+                salt: b"NaCl1234NaCl1234".to_vec(),
                 iteration_count: 1000,
                 key_length: len,
             },

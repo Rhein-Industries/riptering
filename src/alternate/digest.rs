@@ -312,6 +312,7 @@ mod tests {
 
     #[test]
     fn sha256_known_answer() {
+        crate::backend::initialize_backend().expect("backend initialization");
         let output = digest(HashAlgorithm::Sha256, b"abc").unwrap();
         assert_eq!(
             hex::encode(output),
