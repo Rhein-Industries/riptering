@@ -16,7 +16,8 @@ Do not open a public issue, pull request or discussion for a suspected
 vulnerability. Please include:
 
 - the affected version or commit, and the enabled features (document
-  provider, TLS provider, `fips`, `pkcs11`, `legacy`, `post-quantum`);
+  provider, TLS provider, `fips`, `pkcs11`, `legacy`, `legacy-rsa-decryption`,
+  `post-quantum`);
 - the platform and, for PKCS#11 issues, the token or HSM module;
 - a description of the impact and, if possible, a minimal reproduction.
 
@@ -46,3 +47,19 @@ Only the latest 0.6.x release receives security fixes.
   RUSTSEC-2023-0071 (Marvin timing side channel) with no fixed release. See
   `.cargo/audit.toml` for the rationale and mitigations (the AWS-LC
   provider or a PKCS#11 HSM for RSA private-key operations).
+  RSA-OAEP and PKCS#1 v1.5 decryption are refused by default in RustCrypto,
+  before key/ciphertext/label use. The independent `legacy-rsa-decryption`
+  feature explicitly restores affected operations for compatibility and
+  retains the advisory risk; enabling `legacy` alone does not enable them.
+  RustCrypto RSA signing now enables exponent blinding, independently of
+  PSS salt generation; opted-in decryption also enables exponent blinding.
+  This is additional hardening, not evidence that the
+  advisory is fixed or that private RSA operations are timing-safe.
+- PKCS#11 constructors fail closed when key type, modulus/curve or AES length
+  cannot be read and bound to the declared operation. A conforming attribute
+  response is not hardware/provider certification. Consumers must independently
+  validate their token and its deployment policy.
+- Owned PKCS#11 CKA_VALUE templates and retrieved values are wiped on drop;
+  cryptoki 0.12.1 still makes an internal retrieval copy outside this library's
+  ownership. Caller-owned outputs and native module internals require their
+  own secret-memory policy.

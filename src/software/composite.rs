@@ -191,8 +191,10 @@ fn derive_public(variant: CompositeMlDsaVariant, private: &[u8]) -> Result<Vec<u
 
 fn derive_ml_dsa_public(variant: MlDsaVariant, seed: &[u8]) -> Result<Vec<u8>> {
     fn derive<P: ml_dsa::MlDsaParams>(seed: &[u8]) -> Result<Vec<u8>> {
-        let seed = ml_dsa::Seed::try_from(seed)
-            .map_err(|_| Error::Key("ML-DSA seed must be 32 bytes".into()))?;
+        let seed = Zeroizing::new(
+            ml_dsa::Seed::try_from(seed)
+                .map_err(|_| Error::Key("ML-DSA seed must be 32 bytes".into()))?,
+        );
         Ok(ml_dsa::ExpandedSigningKey::<P>::from_seed(&seed)
             .verifying_key()
             .encode()
@@ -297,8 +299,10 @@ fn sign_ml_dsa(
         message: &[u8],
         context: &[u8],
     ) -> Result<Vec<u8>> {
-        let seed = ml_dsa::Seed::try_from(seed)
-            .map_err(|_| Error::Key("ML-DSA seed must be 32 bytes".into()))?;
+        let seed = Zeroizing::new(
+            ml_dsa::Seed::try_from(seed)
+                .map_err(|_| Error::Key("ML-DSA seed must be 32 bytes".into()))?,
+        );
         let signing_key = ml_dsa::ExpandedSigningKey::<P>::from_seed(&seed);
         signing_key
             .sign_randomized(message, context, &mut getrandom::SysRng)

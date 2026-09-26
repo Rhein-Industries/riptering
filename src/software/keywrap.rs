@@ -113,7 +113,7 @@ fn tdes_kw_wrap(kek: &[u8], key_data: &[u8]) -> Result<Vec<u8>> {
     let checksum = &hash[..8];
 
     // 2. WKCKS = key_data || checksum
-    let mut wkcks = Vec::with_capacity(key_data.len() + 8);
+    let mut wkcks = Zeroizing::new(Vec::with_capacity(key_data.len() + 8));
     wkcks.extend_from_slice(key_data);
     wkcks.extend_from_slice(checksum);
 
@@ -202,11 +202,11 @@ fn tdes_cbc_encrypt(key: &[u8], iv: &[u8; 8], data: &[u8]) -> Result<Vec<u8>> {
     if !data.len().is_multiple_of(8) {
         return Err(Error::Crypto("3DES-KW: data not block-aligned".into()));
     }
-    let mut buf = data.to_vec();
+    let mut buf = Zeroizing::new(data.to_vec());
     encryptor
         .encrypt_padded::<cbc::cipher::block_padding::NoPadding>(&mut buf, data.len())
         .map_err(|e| Error::Crypto(format!("3DES-CBC encrypt: {e}")))?;
-    Ok(buf)
+    Ok(std::mem::take(&mut *buf))
 }
 
 /// 3DES-CBC decrypt (no padding -- input must be multiple of 8 bytes).
@@ -217,13 +217,13 @@ fn tdes_cbc_decrypt(key: &[u8], iv: &[u8; 8], data: &[u8]) -> Result<Vec<u8>> {
 
     let decryptor = TdesCbcDec::new_from_slices(key, iv)
         .map_err(|e| Error::Crypto(format!("3DES-CBC init: {e}")))?;
-    let mut buf = data.to_vec();
+    let mut buf = Zeroizing::new(data.to_vec());
     // NoPadding decrypts in place over the whole buffer; return it rather
     // than copying so no unzeroized plaintext copy is left behind.
     decryptor
         .decrypt_padded::<cbc::cipher::block_padding::NoPadding>(&mut buf)
         .map_err(|e| Error::Crypto(format!("3DES-CBC decrypt: {e}")))?;
-    Ok(buf)
+    Ok(std::mem::take(&mut *buf))
 }
 
 #[cfg(test)]

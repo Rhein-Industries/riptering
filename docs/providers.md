@@ -36,7 +36,9 @@ backend test matrix. A parameter combination outside the row returns
 | Ed25519 | yes | yes |
 | AES-CBC/GCM | 128/192/256 | 128/192/256 |
 | AES-KW | 128/192/256 | 128/256 |
-| RSA-OAEP | SHA-1/224/256/384/512 with independent MGF1; MD5/RIPEMD160 with `legacy` | SHA-1/256/384/512 when OAEP and MGF hashes match |
+| RSA-OAEP encryption | digest SHA-1/224/256/384/512, plus MD5/RIPEMD160 with `legacy`; independent MGF1 SHA-1/224/256/384/512 | SHA-1/256/384/512 when OAEP and MGF hashes match |
+| RSA-OAEP decryption | same hash combinations, only with `legacy-rsa-decryption` | same combinations as encryption |
+| RSA PKCS#1 v1.5 transport | encrypt with `legacy`; decrypt requires both `legacy` and `legacy-rsa-decryption` | with `legacy` |
 | ECDH | P-256/P-384/P-521 | P-256/P-384/P-521 |
 | X25519 | yes | yes |
 | finite-field X9.42 DH | neutral hazmat parameters | unsupported |
@@ -50,6 +52,15 @@ The authoritative queries are `supports(Operation)` for a single fully
 parameterized operation and `capabilities()` for the complete tested registry.
 The latter is generated from the same parameter registry used by capability
 tests, rather than from a separately maintained list.
+
+RustCrypto RSA decryption is disabled by default to remove exposure to the
+unpatched [RUSTSEC-2023-0071 timing advisory](https://rustsec.org/advisories/RUSTSEC-2023-0071.html).
+The separate `legacy-rsa-decryption` feature restores it for compatibility;
+`legacy` alone does not. Refusal occurs before inspecting key material,
+ciphertext, or labels, and decrypt primitives are compiled out when the opt-in
+is absent. Opted-in decryption uses exponent blinding, which does not fix the
+remaining upstream padding timing issue. AWS-LC and PKCS#11 are unaffected by
+this feature, and FIPS software RSA transport remains refused in either mode.
 
 ## Initialization and FIPS
 
@@ -71,19 +82,36 @@ fixed-width r||s, r||s with zero-padded or stripped components, and DER.
 Both providers import RSA keys below 2048 bits but refuse to sign, verify or
 transport keys with them, reporting the key size. The RustCrypto provider
 uses them only with the `legacy` feature, for interoperability with
-historical signatures and encrypted documents; AWS-LC never does, and FIPS
+historical signatures and encrypted documents (decryption additionally requires
+`legacy-rsa-decryption`); AWS-LC never does, and FIPS
 builds refuse them already at import.
 
-In a `fips` build:
+In a `fips` build, the software provider applies these restrictions:
 
 - PBKDF2 requires a salt of at least 16 bytes, at least 1000 iterations, and a
   password of at least 14 bytes (SP 800-132, as enforced by AWS-LC's approval
   indicator).
 - PBKDF2, HKDF and ConcatKDF run inside the AWS-LC module. SHA-224 PBKDF2 and
   HKDF have no module implementation and are not approved.
+- HKDF requires nonempty `info` and rejects an explicitly empty salt.
+  `salt: None` supplies the RFC 5869 hash-length zero salt; callers using
+  `HkdfParams::default()` must add nonempty `info` in FIPS builds. These
+  parameter checks preserve the pinned module's service approval conditions;
+  non-FIPS builds continue accepting the full RFC 5869 parameter surface.
 - AES-128/256-GCM encryption uses a nonce generated inside the module.
-  AES-192-GCM encryption has no such construction in AWS-LC and is not
-  approved; AES-192-GCM decryption remains available.
+  The pinned module approves AES-GCM only with 128/256-bit keys, so
+  AES-192-GCM encryption and decryption are both refused in FIPS builds.
+- RSA imports require an even modulus bit length of at least 2048 bits,
+  matching the pinned module's RSA signature service approval conditions.
+- RSA key transport is refused for every digest. In the pinned
+  `aws-lc-fips-sys` 0.14.2 source, RSA encryption/decryption and OAEP padding
+  reside in `crypto/rsa_extra/rsa_crypt.c`, outside the validated
+  `crypto/fipsmodule/bcm.c` aggregate. RSA signatures remain available.
+
+The software module restrictions are separate from PKCS#11 algorithm policy.
+The token may provide its own approved RSA-OAEP or AES-192-GCM decryption
+service; enabling `fips` does not attest the token's module or deployment.
+Operators remain responsible for the token's approval and parameter policy.
 
 FIPS capability reporting excludes unavailable or unapproved operations.
 Building with the `fips` feature does not certify the consuming binary or its

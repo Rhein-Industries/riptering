@@ -216,21 +216,33 @@ impl SoftwareKey {
         Ok(Self::from_rustcrypto(key))
     }
 
-    /// Import raw X25519 key components.
+    /// Import raw X25519 key components. When present, the private component
+    /// must derive the supplied public component.
     pub fn from_x25519(private: Option<&[u8]>, public: &[u8]) -> Result<Self> {
         require_supported(Operation::KeyImport(KeyAlgorithm::X25519))?;
         let public: [u8; 32] = public
             .try_into()
             .map_err(|_| Error::Key("X25519 public key must be 32 bytes".into()))?;
-        let private = private
-            .map(|value| {
-                value
-                    .try_into()
-                    .map_err(|_| Error::Key("X25519 private key must be 32 bytes".into()))
-            })
-            .transpose()?;
+        let private = Zeroizing::new(
+            private
+                .map(|value| {
+                    value
+                        .try_into()
+                        .map_err(|_| Error::Key("X25519 private key must be 32 bytes".into()))
+                })
+                .transpose()?,
+        );
+        if let Some(private_bytes) = private.as_ref() {
+            let secret = x25519_dalek::StaticSecret::from(*private_bytes);
+            let derived = x25519_dalek::PublicKey::from(&secret);
+            if !crate::digest::constant_time_eq(derived.as_bytes(), &public) {
+                return Err(Error::Key("X25519 private/public key mismatch".into()));
+            }
+        }
         Ok(Self::from_rustcrypto(RustCryptoKey::X25519 {
-            private,
+            // Copy into the retained key while leaving the guarded stack
+            // component present so its destructor wipes the temporary bytes.
+            private: *private,
             public,
         }))
     }
@@ -670,6 +682,30 @@ mod tests {
     fn underlying_key_material_is_zeroize_on_drop() {
         fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
         assert_zeroize_on_drop::<RustCryptoKey>();
+    }
+
+    #[test]
+    fn symmetric_key_schedules_are_zeroize_on_drop() {
+        // Guard dependency features: protecting SoftwareKey's raw bytes alone
+        // does not wipe the expanded keys kept by the cipher implementations.
+        fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<aes::Aes128>();
+        assert_zeroize_on_drop::<aes::Aes192>();
+        assert_zeroize_on_drop::<aes::Aes256>();
+        assert_zeroize_on_drop::<aes_kw::KwAes128>();
+        assert_zeroize_on_drop::<aes_kw::KwAes192>();
+        assert_zeroize_on_drop::<aes_kw::KwAes256>();
+        assert_zeroize_on_drop::<cbc::Encryptor<aes::Aes256>>();
+        assert_zeroize_on_drop::<cbc::Decryptor<aes::Aes256>>();
+        #[cfg(feature = "legacy")]
+        assert_zeroize_on_drop::<des::TdesEde3>();
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn slh_dsa_private_keys_are_zeroize_on_drop() {
+        fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<slh_dsa::SigningKey<slh_dsa::Sha2_128f>>();
     }
 
     #[test]

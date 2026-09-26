@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
 //! RSA key transport (RSA-OAEP, optionally RSA PKCS#1 v1.5).
+//!
+//! RustCrypto decryption is disabled unless `legacy-rsa-decryption` is
+//! explicitly enabled. This compatibility feature retains the unpatched
+//! RUSTSEC-2023-0071 timing risk; `legacy` alone does not enable decryption.
 
 use crate::algorithm::{HashAlgorithm, KeyTransportAlgorithm, OaepConfig};
 use crate::backend::{require_supported, Operation};
@@ -40,6 +44,11 @@ pub fn kt_encrypt(
 /// An optional `label` may be provided for OAEP (must match the value used
 /// during encryption). As with [`kt_encrypt`], the label must be valid
 /// UTF-8; non-UTF-8 labels are rejected rather than silently corrupted.
+///
+/// RustCrypto returns [`Error::UnsupportedAlgorithm`] before inspecting the
+/// key, ciphertext, or label unless `legacy-rsa-decryption` is enabled. That
+/// separate opt-in retains an upstream timing advisory and is unsuitable for
+/// environments where an attacker can observe private-operation timing.
 pub fn kt_decrypt(
     algorithm: KeyTransportAlgorithm,
     private_key: &SoftwareKey,
@@ -47,21 +56,34 @@ pub fn kt_decrypt(
     label: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     require_supported(Operation::TransportDecrypt(algorithm))?;
-    let private_key = match private_key.inner() {
-        RustCryptoKey::Rsa {
-            private: Some(private),
-            public,
-        } => {
-            crate::key::enforce_rsa_min_bits(Operation::TransportDecrypt(algorithm), public)?;
-            private
-        }
-        _ => return Err(Error::Key("RSA private key required".into())),
-    };
-    match algorithm {
-        #[cfg(feature = "legacy")]
-        KeyTransportAlgorithm::RsaPkcs1v15 => rsa_pkcs1_decrypt(private_key, encrypted),
-        KeyTransportAlgorithm::RsaOaep(config) => {
-            rsa_oaep_decrypt(private_key, encrypted, &config, label)
+    #[cfg(not(feature = "legacy-rsa-decryption"))]
+    {
+        // Keep a local guard as well as capability admission. Decrypt helpers
+        // are compiled out, so a future registry edit cannot enable them.
+        let _ = (private_key, encrypted, label);
+        Err(Error::unsupported(
+            Operation::TransportDecrypt(algorithm),
+            crate::backend::RSA_DECRYPTION_DISABLED,
+        ))
+    }
+    #[cfg(feature = "legacy-rsa-decryption")]
+    {
+        let private_key = match private_key.inner() {
+            RustCryptoKey::Rsa {
+                private: Some(private),
+                public,
+            } => {
+                crate::key::enforce_rsa_min_bits(Operation::TransportDecrypt(algorithm), public)?;
+                private
+            }
+            _ => return Err(Error::Key("RSA private key required".into())),
+        };
+        match algorithm {
+            #[cfg(feature = "legacy")]
+            KeyTransportAlgorithm::RsaPkcs1v15 => rsa_pkcs1_decrypt(private_key, encrypted),
+            KeyTransportAlgorithm::RsaOaep(config) => {
+                rsa_oaep_decrypt(private_key, encrypted, &config, label)
+            }
         }
     }
 }
@@ -79,11 +101,12 @@ fn rsa_pkcs1_encrypt(public_key: &rsa::RsaPublicKey, key_data: &[u8]) -> Result<
         .map_err(|e| Error::Crypto(format!("RSA PKCS#1 encrypt: {e}")))
 }
 
-#[cfg(feature = "legacy")]
+#[cfg(all(feature = "legacy", feature = "legacy-rsa-decryption"))]
 fn rsa_pkcs1_decrypt(private_key: &rsa::RsaPrivateKey, encrypted: &[u8]) -> Result<Vec<u8>> {
     use rsa::Pkcs1v15Encrypt;
+    let mut rng = rand::rngs::OsRng;
     private_key
-        .decrypt(Pkcs1v15Encrypt, encrypted)
+        .decrypt_blinded(&mut rng, Pkcs1v15Encrypt, encrypted)
         .map_err(|e| Error::Crypto(format!("RSA PKCS#1 decrypt: {e}")))
 }
 
@@ -129,14 +152,16 @@ macro_rules! oaep_encrypt {
 }
 
 /// Inner decrypt macro: creates an OAEP padding scheme from concrete types.
+#[cfg(feature = "legacy-rsa-decryption")]
 macro_rules! oaep_decrypt {
     ($private_key:expr, $encrypted:expr, $digest:ty, $mgf:ty, $label:expr) => {{
         use rsa::Oaep;
         let label = oaep_label($label)?;
         let mut padding = Oaep::new_with_mgf_hash::<$digest, $mgf>();
         padding.label = label;
+        let mut rng = rand::rngs::OsRng;
         $private_key
-            .decrypt(padding, $encrypted)
+            .decrypt_blinded(&mut rng, padding, $encrypted)
             .map_err(|e| Error::Crypto(format!("RSA-OAEP decrypt: {e}")))
     }};
 }
@@ -193,6 +218,7 @@ macro_rules! oaep_dispatch_encrypt {
 /// See [`oaep_dispatch_encrypt`]. The decrypt path errors on the same set of
 /// unsupported hashes so that a caller cannot accidentally decrypt SHA-1
 /// OAEP ciphertexts while believing they asked for SHA-3.
+#[cfg(feature = "legacy-rsa-decryption")]
 macro_rules! oaep_dispatch_decrypt {
     ($pk:expr, $data:expr, $digest:expr, $mgf:expr, $label:expr) => {{
         macro_rules! with_mgf {
@@ -249,6 +275,7 @@ fn rsa_oaep_encrypt(
     )
 }
 
+#[cfg(feature = "legacy-rsa-decryption")]
 fn rsa_oaep_decrypt(
     private_key: &rsa::RsaPrivateKey,
     encrypted: &[u8],
@@ -287,8 +314,64 @@ mod tests {
         (public, private)
     }
 
+    fn assert_default_refused(result: Result<Vec<u8>>, algorithm: KeyTransportAlgorithm) {
+        let error = result.unwrap_err();
+        assert!(matches!(
+            &error,
+            Error::UnsupportedAlgorithm { operation, .. }
+                if *operation == Operation::TransportDecrypt(algorithm)
+        ));
+        assert!(
+            error.to_string().contains("legacy-rsa-decryption"),
+            "{error}"
+        );
+    }
+
+    fn assert_decrypted_or_refused(
+        algorithm: KeyTransportAlgorithm,
+        private: &SoftwareKey,
+        encrypted: &[u8],
+        label: Option<&[u8]>,
+        expected: &[u8],
+    ) {
+        let result = kt_decrypt(algorithm, private, encrypted, label);
+        if cfg!(feature = "legacy-rsa-decryption") {
+            assert_eq!(result.unwrap(), expected);
+        } else {
+            assert_default_refused(result, algorithm);
+        }
+    }
+
+    #[cfg(not(feature = "legacy-rsa-decryption"))]
     #[test]
-    fn test_rsa_oaep_sha1_roundtrip() {
+    fn default_rsa_decryption_refuses_before_key_ciphertext_and_label_use() {
+        let wrong_key = SoftwareKey::from_symmetric_bytes(
+            crate::backend::KeyAlgorithm::Hmac,
+            b"synthetic hmac key",
+        )
+        .unwrap();
+        let algorithms = [
+            KeyTransportAlgorithm::RsaOaep(OaepConfig::default()),
+            KeyTransportAlgorithm::RsaOaep(OaepConfig {
+                digest: HashAlgorithm::Sha1,
+                mgf_digest: HashAlgorithm::Sha256,
+            }),
+        ];
+        for algorithm in algorithms {
+            assert_default_refused(
+                kt_decrypt(algorithm, &wrong_key, b"", Some(&[0xff])),
+                algorithm,
+            );
+        }
+        #[cfg(feature = "legacy")]
+        assert_default_refused(
+            kt_decrypt(KeyTransportAlgorithm::RsaPkcs1v15, &wrong_key, b"", None),
+            KeyTransportAlgorithm::RsaPkcs1v15,
+        );
+    }
+
+    #[test]
+    fn test_rsa_oaep_sha1_encrypt_and_decrypt_policy() {
         // SHA-1 OAEP is still supported for XML-Enc 1.0 `rsa-oaep-mgf1p`
         // interop, but callers must now opt in explicitly — the default
         // moved to SHA-256. Construct the config literally so this test
@@ -302,8 +385,7 @@ mod tests {
         let key_data = b"16-byte-key!!!!"; // 15 bytes
 
         let encrypted = kt_encrypt(algo, &pub_key, key_data, None).unwrap();
-        let decrypted = kt_decrypt(algo, &priv_key, &encrypted, None).unwrap();
-        assert_eq!(decrypted, key_data);
+        assert_decrypted_or_refused(algo, &priv_key, &encrypted, None, key_data);
     }
 
     #[cfg(not(feature = "legacy"))]
@@ -321,7 +403,11 @@ mod tests {
         let err = kt_encrypt(algo, &key, &[0x42; 16], None).unwrap_err();
         assert!(err.to_string().contains("1024-bit RSA key"), "{err}");
         let err = kt_decrypt(algo, &key, &[0u8; 128], None).unwrap_err();
-        assert!(err.to_string().contains("1024-bit RSA key"), "{err}");
+        if cfg!(feature = "legacy-rsa-decryption") {
+            assert!(err.to_string().contains("1024-bit RSA key"), "{err}");
+        } else {
+            assert_default_refused(Err(err), algo);
+        }
     }
 
     #[test]
@@ -333,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rsa_oaep_sha256_roundtrip() {
+    fn test_rsa_oaep_sha256_encrypt_and_decrypt_policy() {
         let (pub_key, priv_key) = test_keypair();
         let algo = KeyTransportAlgorithm::RsaOaep(OaepConfig {
             digest: HashAlgorithm::Sha256,
@@ -342,8 +428,7 @@ mod tests {
         let key_data = [0x42u8; 32];
 
         let encrypted = kt_encrypt(algo, &pub_key, &key_data, None).unwrap();
-        let decrypted = kt_decrypt(algo, &priv_key, &encrypted, None).unwrap();
-        assert_eq!(decrypted, key_data);
+        assert_decrypted_or_refused(algo, &priv_key, &encrypted, None, &key_data);
     }
 
     #[test]
@@ -354,10 +439,10 @@ mod tests {
         let label = b"my-label";
 
         let encrypted = kt_encrypt(algo, &pub_key, key_data, Some(label)).unwrap();
-        let decrypted = kt_decrypt(algo, &priv_key, &encrypted, Some(label)).unwrap();
-        assert_eq!(decrypted, key_data);
+        assert_decrypted_or_refused(algo, &priv_key, &encrypted, Some(label), key_data);
     }
 
+    #[cfg(feature = "legacy-rsa-decryption")]
     #[test]
     fn test_rsa_oaep_wrong_key_fails() {
         let (pub_key, _priv_key) = test_keypair();
@@ -381,8 +466,7 @@ mod tests {
         let key_data = [0xAB; 24];
 
         let encrypted = kt_encrypt(algo, &pub_key, &key_data, None).unwrap();
-        let decrypted = kt_decrypt(algo, &priv_key, &encrypted, None).unwrap();
-        assert_eq!(decrypted, key_data);
+        assert_decrypted_or_refused(algo, &priv_key, &encrypted, None, &key_data);
     }
 
     #[test]
@@ -409,10 +493,14 @@ mod tests {
         // before the decryption path even runs.
         let ct = kt_encrypt(algo, &pub_key, b"k", Some(b"good")).unwrap();
         let err = kt_decrypt(algo, &priv_key, &ct, Some(bad_label)).unwrap_err();
-        assert!(
-            matches!(err, Error::Crypto(ref m) if m.contains("UTF-8")),
-            "got {err:?}"
-        );
+        if cfg!(feature = "legacy-rsa-decryption") {
+            assert!(
+                matches!(err, Error::Crypto(ref m) if m.contains("UTF-8")),
+                "got {err:?}"
+            );
+        } else {
+            assert_default_refused(Err(err), algo);
+        }
     }
 
     #[test]
@@ -428,13 +516,16 @@ mod tests {
         });
         let label = "utf8-label-\u{1F600}-end".as_bytes();
         let ct = kt_encrypt(algo, &pub_key, b"k", Some(label)).unwrap();
-        let pt = kt_decrypt(algo, &priv_key, &ct, Some(label)).unwrap();
-        assert_eq!(pt, b"k");
+        assert_decrypted_or_refused(algo, &priv_key, &ct, Some(label), b"k");
 
         // A different label must fail to decrypt (sanity: the label is
         // actually participating in the OAEP construction).
         let err = kt_decrypt(algo, &priv_key, &ct, Some(b"other")).unwrap_err();
-        assert!(matches!(err, Error::Crypto(_)), "got {err:?}");
+        if cfg!(feature = "legacy-rsa-decryption") {
+            assert!(matches!(err, Error::Crypto(_)), "got {err:?}");
+        } else {
+            assert_default_refused(Err(err), algo);
+        }
     }
 
     #[test]
@@ -483,13 +574,12 @@ mod tests {
 
     #[cfg(feature = "legacy")]
     #[test]
-    fn test_rsa_pkcs1v15_roundtrip() {
+    fn test_rsa_pkcs1v15_encrypt_and_decrypt_policy() {
         let (pub_key, priv_key) = test_keypair();
         let algo = KeyTransportAlgorithm::RsaPkcs1v15;
         let key_data = b"a 24 byte key here!!!!!";
 
         let encrypted = kt_encrypt(algo, &pub_key, key_data, None).unwrap();
-        let decrypted = kt_decrypt(algo, &priv_key, &encrypted, None).unwrap();
-        assert_eq!(decrypted, key_data);
+        assert_decrypted_or_refused(algo, &priv_key, &encrypted, None, key_data);
     }
 }

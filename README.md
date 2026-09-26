@@ -35,7 +35,7 @@ over PKCS#11 HSMs. Requires Rust 1.88 or later.
   AWS-LC verifies the cross curve/digest ECDSA pairs XML-DSig produces.
 - **FIPS (AWS-LC).** PBKDF2, HKDF and ConcatKDF use the AWS-LC module
   implementations; PBKDF2 enforces the SP 800-132 minimums; AES-128/256-GCM
-  nonces are generated inside the module; AES-192-GCM encryption and SHA-224
+  nonces are generated inside the module; AES-192-GCM operations and SHA-224
   PBKDF2/HKDF are not reported as approved.
 - **RustCrypto hardening.** AES-CBC and AES-KW length checks, a bounded
   RSA-PSS salt length, DH group and exponent validation, post-quantum import
@@ -59,9 +59,9 @@ general fix, we intend to offer it to kryptering as well.
 
 ```toml
 [dependencies]
-riptering = "0.6"
+riptering = "0.7"
 # or keep the `kryptering::` paths in your code:
-# kryptering = { package = "riptering", version = "0.6" }
+# kryptering = { package = "riptering", version = "0.7" }
 ```
 
 With the plain `riptering` dependency, replace `kryptering::` with
@@ -82,7 +82,7 @@ pass the hash algorithm as the new first argument.
 | **Signatures** | RSA PKCS#1v1.5, RSA-PSS, ECDSA (P-256/P-384/P-521), Ed25519, HMAC, DSA (legacy), ML-DSA, SLH-DSA, composite ML-DSA |
 | **Ciphers** | AES-GCM, AES-CBC (hazmat, unauthenticated — `riptering::hazmat::aes_cbc`), 3DES-CBC (legacy) |
 | **Key wrap** | AES-KW (RFC 3394), 3DES-KW (legacy) |
-| **Key transport** | RSA-OAEP, RSA PKCS#1v1.5 (legacy) |
+| **Key transport** | RSA-OAEP, RSA PKCS#1v1.5 (legacy); RustCrypto decryption requires a separate explicit opt-in |
 | **Key agreement** | ECDH (P-256/P-384/P-521), X25519, DH (X9.42, hazmat — `riptering::hazmat::dh`) |
 | **KEM** | ML-KEM-512/768/1024 (FIPS 203; RustCrypto provider) |
 | **KDFs** | ConcatKDF, PBKDF2, HKDF, PKCS#12 Appendix B (import interoperability; non-FIPS only) |
@@ -96,6 +96,7 @@ pass the hash algorithm as the new first argument.
 | `aws-lc` | No | AWS-LC document cryptography (Linux or macOS, x86_64/aarch64) |
 | `pkcs11` | Yes | PKCS#11 HSM support via `cryptoki` |
 | `legacy` | No | MD5, RIPEMD-160, 3DES, DSA |
+| `legacy-rsa-decryption` | No | Re-enable affected RustCrypto RSA decryption for compatibility; retains the unpatched timing advisory and is independent of `legacy` |
 | `post-quantum` | No | ML-DSA (FIPS 204), SLH-DSA (FIPS 205), ML-KEM (FIPS 203), composite ML-DSA signatures; RustCrypto only |
 | `tls-ring` | No | rustls with ring |
 | `tls-aws-lc` | No | rustls with AWS-LC |
@@ -115,6 +116,14 @@ See [provider capabilities and FIPS behavior](docs/providers.md) for the exact
 operation matrix and supported OAEP/signature combinations. The compile-time
 provider architecture and future-backend contract are recorded in
 [ADR 0002](docs/adr/0002-compile-time-provider-boundary.md).
+
+RustCrypto refuses RSA-OAEP and PKCS#1 v1.5 decryption by default, before key,
+ciphertext, or label access. `legacy` alone does not change this policy. The
+separate `legacy-rsa-decryption` compatibility feature enables those private
+operations despite [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html),
+which still has no patched release. RSA encryption and signatures remain
+available; AWS-LC and PKCS#11 retain their existing policies. Query
+`supports(Operation::TransportDecrypt(...))` before negotiating decryption.
 
 ## Usage
 
@@ -163,7 +172,21 @@ In a `fips` build, call `initialize_backend()` once during startup, before any
 cryptographic or HTTPS operation, and check the returned `BackendInfo`.
 Initialization is mandatory, process-wide, and idempotent. Feature activation
 alone is not a statement that an application or deployment is FIPS certified.
-FIPS policy rejects the PKCS#12 Appendix B KDF and RSA keys below 2048 bits.
+The software FIPS policy rejects the PKCS#12 Appendix B KDF and RSA keys below
+2048 bits. It also rejects odd-bit RSA moduli, AES-192-GCM operations, and RSA
+key transport outside the pinned validated module. FIPS HKDF requires nonempty
+`info` and refuses an explicitly empty salt; `salt: None` remains supported.
+PKCS#11 has a separate algorithm policy and requires deployment-specific token
+attestation; software backend initialization does not attest an HSM.
+PKCS#11 operation constructors require readable, unique key attributes:
+`CKA_KEY_TYPE`, RSA `CKA_MODULUS`, EC `CKA_EC_PARAMS`, and AES `CKA_VALUE_LEN`
+as applicable. Missing parameters reject. RSA needs at least 2048 bits; EC
+curves and AES lengths must match the declared algorithm. ECDH currently
+requires P-256/P-384/P-521 with full-length shared secrets (32/48/66 bytes).
+HMAC-SHA256 requires `CKK_GENERIC_SECRET`; typed HMAC metadata is rejected
+because the pinned cryptoki dependency aliases several typed HMAC constants.
+These checks bind declarations to token metadata and do not attest vendor
+implementations, mechanism approval, RNG quality, or side-channel behavior.
 The AWS-LC provider also reports non-digest-length RSA-PSS salts as
 `UnsupportedAlgorithm` because its stable API does not expose them.
 

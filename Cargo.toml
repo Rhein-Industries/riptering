@@ -1,6 +1,6 @@
 [package]
 name = "riptering"
-version = "0.6.2"
+version = "0.7.0"
 edition = "2021"
 # riptering is Rhein Industries' maintained fork of kryptering by Kushal Das
 # (https://github.com/kushaldas/kryptering); see README.md and LICENSE.
@@ -33,10 +33,13 @@ rustcrypto = [
     "dep:signature", "dep:rand",
     "dep:crypto-bigint", "dep:md-5", "dep:ripemd", "dep:des", "dep:ml-dsa",
     "dep:slh-dsa", "dep:ml-kem", "dep:pkcs8-pq", "dep:getrandom",
-    "dep:generic-array",
+    "dep:generic-array", "dep:ghash",
 ]
 aws-lc = ["dep:aws-lc-rs"]
 legacy = []
+# Explicit compatibility opt-in for the unpatched RustCrypto RSA timing
+# advisory. Independent of legacy algorithms; has no effect on AWS-LC/HSMs.
+legacy-rsa-decryption = []
 post-quantum = []
 pkcs11 = ["dep:cryptoki"]
 tls-ring = ["dep:rustls", "rustls/ring"]
@@ -58,10 +61,13 @@ dsa = { version = "0.6", optional = true }
 p256 = { version = "0.13", features = ["ecdsa", "ecdh"], optional = true }
 p384 = { version = "0.13", features = ["ecdsa", "ecdh"], optional = true }
 p521 = { version = "0.13", features = ["ecdsa", "ecdh", "pkcs8"], optional = true }
-aes = { version = "0.9", optional = true }
-cbc = { version = "0.2", optional = true }
-aes-gcm = { version = "0.11", optional = true }
-aes-kw = { version = "0.3", optional = true }
+aes = { version = "0.9", features = ["zeroize"], optional = true }
+cbc = { version = "0.2", features = ["zeroize"], optional = true }
+aes-gcm = { version = "0.11", features = ["zeroize"], optional = true }
+# AES-GCM's zeroize feature does not forward to its GHASH state. Unify the
+# existing GHASH dependency's wiping feature, which also forwards to POLYVAL.
+ghash = { version = "0.6", features = ["zeroize"], optional = true }
+aes-kw = { version = "0.3", features = ["zeroize"], optional = true }
 ed25519-dalek = { version = "2.1", features = ["pkcs8", "rand_core"], optional = true }
 # Ed448 is needed by draft-ietf-jose-pq-composite-sigs. This pre-release
 # RustCrypto implementation is pinned so draft-vector behavior cannot move
@@ -83,11 +89,11 @@ rustls = { version = "0.23.45", default-features = false, features = ["std", "tl
 # Legacy (optional)
 md-5 = { version = "0.10", features = ["oid"], optional = true }
 ripemd = { version = "0.1", features = ["oid"], optional = true }
-des = { version = "0.9", optional = true }
+des = { version = "0.9", features = ["zeroize"], optional = true }
 
 # Post-quantum (optional)
 ml-dsa = { version = "0.1.0", features = ["pkcs8", "rand_core", "zeroize"], optional = true }
-slh-dsa = { version = "0.2.0-rc.5", optional = true }
+slh-dsa = { version = "0.2.0-rc.5", features = ["zeroize"], optional = true }
 # `hazmat` is an empty feature that only un-hides encapsulate_deterministic
 # in the docs; we call it with fresh OS entropy because kem 0.3's
 # Encapsulate trait only accepts an infallible CryptoRng (see ADR 0001).

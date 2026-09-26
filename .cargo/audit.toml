@@ -11,13 +11,18 @@
 ignore = [
     # RUSTSEC-2023-0071 — rsa 0.9.x "Marvin Attack" timing sidechannel.
     # Severity 5.9 (medium). No fixed release exists: re-checked
-    # 2026-09-24 against the RustSec database, which lists rsa 0.9.10
+    # 2026-09-26 against the RustSec database, which lists rsa 0.9.10
     # (the latest stable, and the version riptering locks) and every
     # 0.10.0-rc.x pre-release as affected (`patched = []`). Riptering's
     # threat model for its direct consumers (server-side RSA private
-    # operations) does include this risk. Only the RustCrypto provider
-    # links `rsa` for private operations; AWS-LC builds use `rsa` solely
-    # as a test-only dev-dependency. Callers for whom timing-side-channel
+    # operations) does include this risk. RustCrypto decryption is refused
+    # by default, before key/input access. The separate off-by-default
+    # legacy-rsa-decryption feature restores affected decrypt operations;
+    # legacy alone does not. This entry remains because the dependency is
+    # unpatched, signing timing assurance is not established, and opt-in
+    # decryption retains risk. Exponent blinding is not an advisory fix.
+    # Only RustCrypto links `rsa` for private operations; AWS-LC builds use
+    # it solely as a test-only dev-dependency. Callers for whom timing-side-channel
     # resistance is load-bearing should select the AWS-LC provider or
     # route RSA private operations through an HSM via riptering::pkcs11.
     # Upstream: https://github.com/RustCrypto/RSA/issues/626

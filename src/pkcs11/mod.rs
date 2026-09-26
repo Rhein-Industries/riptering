@@ -21,6 +21,7 @@ use cryptoki::slot::Slot;
 use cryptoki::types::Ulong;
 use zeroize::{Zeroize, Zeroizing};
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -525,6 +526,17 @@ impl Pkcs11Session {
         &self.session
     }
 
+    fn validate_key(&self, key: ObjectHandle, expected: TokenKey) -> Result<()> {
+        let session = self
+            .session
+            .lock()
+            .map_err(|e| Error::Pkcs11(format!("session lock poisoned: {e}")))?;
+        let attrs = session
+            .get_attributes(key, expected.attributes())
+            .map_err(|e| Error::Pkcs11(format!("required key attributes unavailable: {e}")))?;
+        validate_token_key_attributes(&attrs, expected)
+    }
+
     // Internal helper shared by the three public `find_*` methods.
     fn find_object(
         &self,
@@ -564,6 +576,122 @@ impl Pkcs11Session {
 // ---------------------------------------------------------------------------
 // Algorithm -> Mechanism mapping
 // ---------------------------------------------------------------------------
+
+/// Parameters that must be attested by readable token attributes. Missing,
+/// duplicate and unsupported attributes fail closed, including outside FIPS.
+#[derive(Clone, Copy, Debug)]
+enum TokenKey {
+    Rsa,
+    Ec(crate::algorithm::EcCurve),
+    Ed25519,
+    Aes(crate::algorithm::AesKeySize),
+    HmacSha256,
+}
+
+impl TokenKey {
+    fn attributes(self) -> &'static [AttributeType] {
+        match self {
+            Self::Rsa => &[AttributeType::KeyType, AttributeType::Modulus],
+            Self::Ec(_) | Self::Ed25519 => &[AttributeType::KeyType, AttributeType::EcParams],
+            Self::Aes(_) => &[AttributeType::KeyType, AttributeType::ValueLen],
+            Self::HmacSha256 => &[AttributeType::KeyType],
+        }
+    }
+}
+
+fn required_attribute(attrs: &[Attribute], kind: AttributeType) -> Result<&Attribute> {
+    let mut matches = attrs.iter().filter(|attr| attr.attribute_type() == kind);
+    let value = matches
+        .next()
+        .ok_or_else(|| Error::Pkcs11(format!("required key attribute {kind:?} is unavailable")))?;
+    if matches.next().is_some() {
+        return Err(Error::Pkcs11(format!("duplicate key attribute {kind:?}")));
+    }
+    Ok(value)
+}
+
+fn validate_token_key_attributes(attrs: &[Attribute], expected: TokenKey) -> Result<()> {
+    let Attribute::KeyType(actual_type) = required_attribute(attrs, AttributeType::KeyType)? else {
+        unreachable!("attribute type matches its variant")
+    };
+    let expected_type = match expected {
+        TokenKey::Rsa => KeyType::RSA,
+        TokenKey::Ec(_) => KeyType::EC,
+        TokenKey::Ed25519 => KeyType::EC_EDWARDS,
+        TokenKey::Aes(_) => KeyType::AES,
+        TokenKey::HmacSha256 => KeyType::GENERIC_SECRET,
+    };
+    // cryptoki 0.12.1 aliases several typed HMAC constants to SHA256_HMAC.
+    // Only GENERIC_SECRET has unambiguous metadata in that dependency; do not
+    // attest a typed HMAC algorithm from the lossy conversion.
+    if *actual_type != expected_type {
+        return Err(Error::Pkcs11(format!(
+            "token key type does not match {expected:?}"
+        )));
+    }
+    match expected {
+        TokenKey::Rsa => {
+            let Attribute::Modulus(modulus) = required_attribute(attrs, AttributeType::Modulus)?
+            else {
+                unreachable!("attribute type matches its variant")
+            };
+            let modulus = &modulus[modulus
+                .iter()
+                .position(|byte| *byte != 0)
+                .unwrap_or(modulus.len())..];
+            let bits = modulus.first().map_or(0, |first| {
+                (modulus.len() - 1) * 8 + (8 - first.leading_zeros() as usize)
+            });
+            if bits < 2048
+                || modulus.last().is_none_or(|byte| byte & 1 == 0)
+                || (cfg!(feature = "fips") && !bits.is_multiple_of(2))
+            {
+                return Err(Error::Pkcs11("token RSA modulus must be odd and at least 2048 bits; FIPS additionally requires an even bit length".into()));
+            }
+        }
+        TokenKey::Ec(curve) => {
+            let Attribute::EcParams(params) = required_attribute(attrs, AttributeType::EcParams)?
+            else {
+                unreachable!("attribute type matches its variant")
+            };
+            if ec_curve_for_ec_params(params) != Some(curve) {
+                return Err(Error::Pkcs11(format!(
+                    "token EC parameters do not match {curve:?}"
+                )));
+            }
+        }
+        TokenKey::Ed25519 => {
+            let Attribute::EcParams(params) = required_attribute(attrs, AttributeType::EcParams)?
+            else {
+                unreachable!("attribute type matches its variant")
+            };
+            // PKCS#11 permits the Ed25519 OID or PrintableString curve name.
+            if params != &[0x06, 0x03, 0x2b, 0x65, 0x70] && params != b"\x13\x0cedwards25519" {
+                return Err(Error::Pkcs11(
+                    "token Edwards parameters must identify Ed25519".into(),
+                ));
+            }
+        }
+        TokenKey::Aes(size) => check_kek_value_len(attrs, size.key_len())?,
+        TokenKey::HmacSha256 => {}
+    }
+    Ok(())
+}
+
+fn asymmetric_signature_key(
+    algorithm: SignatureAlgorithm,
+    operation: Operation,
+) -> Result<TokenKey> {
+    signature_mechanism(&algorithm, operation)?;
+    match algorithm {
+        SignatureAlgorithm::RsaPkcs1v15(_) | SignatureAlgorithm::RsaPss(_) => Ok(TokenKey::Rsa),
+        SignatureAlgorithm::Ecdsa(curve, _) => Ok(TokenKey::Ec(curve)),
+        SignatureAlgorithm::Ed25519 => Ok(TokenKey::Ed25519),
+        _ => Err(Error::Key(
+            "asymmetric token signature key required; use Pkcs11HmacSigner for HMAC".into(),
+        )),
+    }
+}
 
 /// Map a [`SignatureAlgorithm`] to the corresponding cryptoki [`Mechanism`].
 ///
@@ -706,10 +834,12 @@ fn hash_to_mgf(h: HashAlgorithm, operation: Operation) -> Result<PkcsMgfType> {
 ///
 /// For ECDSA (CKM_ECDSA) the token expects a pre-computed hash; for all
 /// other mechanisms the token performs hashing internally.
-fn prepare_sign_data(algo: &SignatureAlgorithm, data: &[u8]) -> Result<Vec<u8>> {
+fn prepare_sign_data<'a>(algo: &SignatureAlgorithm, data: &'a [u8]) -> Result<Cow<'a, [u8]>> {
     match algo {
-        SignatureAlgorithm::Ecdsa(_, hash) => crate::digest::digest(*hash, data),
-        _ => Ok(data.to_vec()),
+        SignatureAlgorithm::Ecdsa(_, hash) => crate::digest::digest(*hash, data).map(Cow::Owned),
+        // cryptoki only borrows these bytes, so token-side hashing does not
+        // need a second message-sized allocation or copy.
+        _ => Ok(Cow::Borrowed(data)),
     }
 }
 
@@ -732,7 +862,9 @@ impl Pkcs11Signer {
         key_label: &str,
         algorithm: SignatureAlgorithm,
     ) -> Result<Self> {
+        let expected = asymmetric_signature_key(algorithm, Operation::Sign(algorithm))?;
         let key_handle = session.find_private_key(key_label)?;
+        session.validate_key(key_handle, expected)?;
         Ok(Self {
             session: Arc::clone(&session.session),
             key_handle,
@@ -785,7 +917,9 @@ impl Pkcs11Verifier {
         key_label: &str,
         algorithm: SignatureAlgorithm,
     ) -> Result<Self> {
+        let expected = asymmetric_signature_key(algorithm, Operation::Verify(algorithm))?;
         let key_handle = session.find_public_key(key_label)?;
+        session.validate_key(key_handle, expected)?;
         Ok(Self {
             session: Arc::clone(&session.session),
             key_handle,
@@ -842,7 +976,12 @@ impl Pkcs11HmacSigner {
         key_label: &str,
         algorithm: SignatureAlgorithm,
     ) -> Result<Self> {
+        signature_mechanism(&algorithm, Operation::Sign(algorithm))?;
+        if !matches!(algorithm, SignatureAlgorithm::Hmac(HashAlgorithm::Sha256)) {
+            return Err(Error::Key("HMAC-SHA256 token key required".into()));
+        }
         let key_handle = session.find_secret_key(key_label)?;
+        session.validate_key(key_handle, TokenKey::HmacSha256)?;
         Ok(Self {
             session: Arc::clone(&session.session),
             key_handle,
@@ -931,6 +1070,7 @@ impl Pkcs11Decryptor {
         oaep_label: Option<Vec<u8>>,
     ) -> Result<Self> {
         let key_handle = session.find_private_key(key_label)?;
+        session.validate_key(key_handle, TokenKey::Rsa)?;
         Ok(Self {
             session: Arc::clone(&session.session),
             key_handle,
@@ -991,6 +1131,7 @@ impl Pkcs11Encryptor {
         oaep_label: Option<Vec<u8>>,
     ) -> Result<Self> {
         let key_handle = session.find_public_key(key_label)?;
+        session.validate_key(key_handle, TokenKey::Rsa)?;
         Ok(Self {
             session: Arc::clone(&session.session),
             key_handle,
@@ -1090,9 +1231,8 @@ impl Pkcs11KeyWrapper {
     /// Create a new key wrapper.  `key_label` identifies the AES KEK on the
     /// token.
     ///
-    /// For [`KeyWrapAlgorithm::AesKw`] the KEK's `CKA_VALUE_LEN` must match
-    /// the declared AES key size. Tokens that do not expose
-    /// `CKA_VALUE_LEN` skip this check.
+    /// For [`KeyWrapAlgorithm::AesKw`] the readable `CKA_KEY_TYPE` must be AES
+    /// and `CKA_VALUE_LEN` must match the declared size. Missing attributes reject.
     pub fn new(
         session: &Pkcs11Session,
         key_label: &str,
@@ -1101,15 +1241,7 @@ impl Pkcs11KeyWrapper {
         let key_handle = session.find_secret_key(key_label)?;
         #[allow(irrefutable_let_patterns)] // TripleDesKw only exists with `legacy`
         if let KeyWrapAlgorithm::AesKw(size) = algorithm {
-            let guard = session
-                .session
-                .lock()
-                .map_err(|e| Error::Pkcs11(format!("session lock poisoned: {e}")))?;
-            let attrs = guard
-                .get_attributes(key_handle, &[AttributeType::ValueLen])
-                .map_err(|e| Error::Pkcs11(format!("C_GetAttributeValue failed: {e}")))?;
-            drop(guard);
-            check_kek_value_len(&attrs, size.key_len())?;
+            session.validate_key(key_handle, TokenKey::Aes(size))?;
         }
         let (wrap_call, unwrap_call) = keywrap_calls(session, algorithm)?;
         Ok(Self {
@@ -1224,7 +1356,7 @@ fn wrap_with_wrap_key(
     kek: ObjectHandle,
     key_data: &[u8],
 ) -> Result<Vec<u8>> {
-    let mut template = vec![
+    let template = SecretAttributes(vec![
         Attribute::Class(ObjectClass::SECRET_KEY),
         Attribute::KeyType(KeyType::GENERIC_SECRET),
         // Session object: never persisted to the token, and destroyed by
@@ -1232,14 +1364,10 @@ fn wrap_with_wrap_key(
         Attribute::Token(false),
         Attribute::Extractable(true),
         Attribute::Value(key_data.to_vec()),
-    ];
-    let created = session.create_object(&template);
-    // The template holds a copy of the key bytes.
-    for attr in &mut template {
-        if let Attribute::Value(value) = attr {
-            value.zeroize();
-        }
-    }
+    ]);
+    let created = session.create_object(&template.0);
+    // Drop the guarded template immediately after the token receives it.
+    drop(template);
     let key =
         created.map_err(|e| Error::Pkcs11(format!("C_CreateObject (key to wrap) failed: {e}")))?;
     let wrapped = session
@@ -1277,43 +1405,92 @@ fn unwrap_with_unwrap_key(
     let key = session
         .unwrap_key(mechanism, kek, wrapped, &template)
         .map_err(|e| Error::Pkcs11(format!("C_UnwrapKey failed: {e}")))?;
-    let value = session
+    read_and_destroy_temporary_secret(
+        || read_secret_value(session, key, "unwrapped key"),
+        || {
+            session.destroy_object(key).map_err(|e| {
+                Error::Pkcs11(format!(
+                    "C_DestroyObject failed for the unwrapped key object; close the session to \
+                     purge it: {e}"
+                ))
+            })
+        },
+    )
+}
+
+fn read_secret_value(
+    session: &cryptoki::session::Session,
+    key: ObjectHandle,
+    description: &str,
+) -> Result<Zeroizing<Vec<u8>>> {
+    let attrs = session
         .get_attributes(key, &[AttributeType::Value])
-        .map_err(|e| Error::Pkcs11(format!("C_GetAttributeValue failed: {e}")))
-        .and_then(|attrs| {
-            attrs
-                .into_iter()
-                .find_map(|attr| match attr {
-                    Attribute::Value(v) => Some(Zeroizing::new(v)),
-                    _ => None,
-                })
-                .ok_or_else(|| Error::Pkcs11("CKA_VALUE not present on unwrapped key".into()))
-        });
-    // As in `wrap_with_wrap_key`, a failed destroy takes precedence; the
-    // read value is zeroized on drop.
-    session.destroy_object(key).map_err(|e| {
-        Error::Pkcs11(format!(
-            "C_DestroyObject failed for the unwrapped key object; close the session to \
-             purge it: {e}"
-        ))
-    })?;
+        .map_err(|e| Error::Pkcs11(format!("C_GetAttributeValue failed: {e}")))?;
+    extract_secret_value(SecretAttributes(attrs), description)
+}
+
+/// Wipe every library-owned CKA_VALUE copy, including malformed duplicate
+/// responses and unwinding. cryptoki's internal retrieval buffers are outside
+/// this ownership boundary and remain an upstream limitation.
+struct SecretAttributes(Vec<Attribute>);
+
+impl Drop for SecretAttributes {
+    fn drop(&mut self) {
+        for attr in &mut self.0 {
+            if let Attribute::Value(value) = attr {
+                value.zeroize();
+            }
+        }
+    }
+}
+
+fn extract_secret_value(
+    mut attrs: SecretAttributes,
+    description: &str,
+) -> Result<Zeroizing<Vec<u8>>> {
+    let mut indices = attrs
+        .0
+        .iter()
+        .enumerate()
+        .filter_map(|(index, attr)| matches!(attr, Attribute::Value(_)).then_some(index));
+    let index = indices
+        .next()
+        .ok_or_else(|| Error::Pkcs11(format!("CKA_VALUE not present on {description}")))?;
+    if indices.next().is_some() {
+        return Err(Error::Pkcs11(format!(
+            "duplicate CKA_VALUE on {description}"
+        )));
+    }
+    let Attribute::Value(value) = &mut attrs.0[index] else {
+        unreachable!()
+    };
+    Ok(Zeroizing::new(std::mem::take(value)))
+}
+
+/// Destroy an extractable session secret even when reading it fails. A
+/// cleanup error takes precedence so callers learn that closing the session
+/// is necessary; a successfully read secret is then zeroized on the error path.
+fn read_and_destroy_temporary_secret(
+    read: impl FnOnce() -> Result<Zeroizing<Vec<u8>>>,
+    destroy: impl FnOnce() -> Result<()>,
+) -> Result<Vec<u8>> {
+    let value = read();
+    destroy()?;
     let mut value = value?;
     Ok(std::mem::take(&mut *value))
 }
 
-/// Check a KEK's `CKA_VALUE_LEN` (if the token returned it) against the
-/// declared key size in bytes. An absent attribute is accepted.
+/// Require a unique readable `CKA_VALUE_LEN` matching the declared AES size.
 fn check_kek_value_len(attrs: &[Attribute], expected: usize) -> Result<()> {
-    for attr in attrs {
-        if let Attribute::ValueLen(len) = attr {
-            let actual = **len;
-            if usize::try_from(actual).ok() != Some(expected) {
-                return Err(Error::Pkcs11(format!(
-                    "PKCS#11 KEK length mismatch: token key has CKA_VALUE_LEN {actual} bytes, \
-                     algorithm declares {expected} bytes"
-                )));
-            }
-        }
+    let Attribute::ValueLen(len) = required_attribute(attrs, AttributeType::ValueLen)? else {
+        unreachable!("attribute type matches its variant")
+    };
+    let actual = **len;
+    if usize::try_from(actual).ok() != Some(expected) {
+        return Err(Error::Pkcs11(format!(
+            "PKCS#11 AES length mismatch: token key has CKA_VALUE_LEN {actual} bytes, \
+             algorithm declares {expected} bytes"
+        )));
     }
     Ok(())
 }
@@ -1343,9 +1520,8 @@ pub struct Pkcs11KeyAgreement {
     key_handle: ObjectHandle,
     /// Expected byte-length of the derived shared secret.
     key_len: usize,
-    /// Named curve read from the private key's `CKA_EC_PARAMS`, or `None`
-    /// if the token did not expose it or it is not P-256/P-384/P-521.
-    curve: Option<crate::algorithm::EcCurve>,
+    /// Named curve validated against readable private-key attributes.
+    curve: crate::algorithm::EcCurve,
 }
 
 impl Pkcs11KeyAgreement {
@@ -1353,8 +1529,8 @@ impl Pkcs11KeyAgreement {
     /// private key on the token, and `key_len` is the expected shared secret
     /// size in bytes (e.g. 32 for P-256).
     ///
-    /// The curve used for FIPS policy checks is taken from the key's
-    /// `CKA_EC_PARAMS` (named-curve OID), not inferred from `key_len`.
+    /// A readable EC key type and P-256/P-384/P-521 named-curve OID are
+    /// required. `key_len` must be the curve's full shared-secret size.
     pub fn new(session: &Pkcs11Session, key_label: &str, key_len: usize) -> Result<Self> {
         let key_handle = session.find_private_key(key_label)?;
         let guard = session
@@ -1362,13 +1538,30 @@ impl Pkcs11KeyAgreement {
             .lock()
             .map_err(|e| Error::Pkcs11(format!("session lock poisoned: {e}")))?;
         let attrs = guard
-            .get_attributes(key_handle, &[AttributeType::EcParams])
+            .get_attributes(
+                key_handle,
+                &[AttributeType::KeyType, AttributeType::EcParams],
+            )
             .map_err(|e| Error::Pkcs11(format!("C_GetAttributeValue failed: {e}")))?;
         drop(guard);
         let curve = attrs.iter().find_map(|attr| match attr {
             Attribute::EcParams(params) => ec_curve_for_ec_params(params),
             _ => None,
         });
+        let curve = curve.ok_or_else(|| {
+            Error::Pkcs11("ECDH requires readable P-256/P-384/P-521 parameters".into())
+        })?;
+        validate_token_key_attributes(&attrs, TokenKey::Ec(curve))?;
+        let expected_len = match curve {
+            crate::algorithm::EcCurve::P256 => 32,
+            crate::algorithm::EcCurve::P384 => 48,
+            crate::algorithm::EcCurve::P521 => 66,
+        };
+        if key_len != expected_len {
+            return Err(Error::Pkcs11(format!(
+                "ECDH shared secret length must be {expected_len} for {curve:?}"
+            )));
+        }
         Ok(Self {
             session: Arc::clone(&session.session),
             key_handle,
@@ -1399,17 +1592,7 @@ fn ec_curve_for_ec_params(params: &[u8]) -> Option<crate::algorithm::EcCurve> {
 
 impl KeyAgreement for Pkcs11KeyAgreement {
     fn agree(&self, peer_public_key: &[u8]) -> Result<Vec<u8>> {
-        if let Some(curve) = self.curve {
-            crate::backend::require_fips_approved(Operation::Agreement(curve))?;
-        } else {
-            crate::backend::ensure_backend()?;
-            #[cfg(feature = "fips")]
-            return Err(Error::Crypto(
-                "FIPS policy cannot approve PKCS#11 ECDH: private key CKA_EC_PARAMS is not \
-                 the named curve P-256, P-384 or P-521"
-                    .into(),
-            ));
-        }
+        crate::backend::require_fips_approved(Operation::Agreement(self.curve))?;
         let ec_params = Ecdh1DeriveParams::new(EcKdf::null(), peer_public_key);
         let mechanism = Mechanism::Ecdh1Derive(ec_params);
 
@@ -1437,35 +1620,16 @@ impl KeyAgreement for Pkcs11KeyAgreement {
             .derive_key(&mechanism, self.key_handle, &template)
             .map_err(|e| Error::Pkcs11(format!("C_DeriveKey (ECDH) failed: {e}")))?;
 
-        // Read CKA_VALUE, then destroy the extractable derived object on
-        // every path before propagating any error.
-        let value = session
-            .get_attributes(derived_key, &[AttributeType::Value])
-            .map_err(|e| Error::Pkcs11(format!("C_GetAttributeValue failed: {e}")))
-            .and_then(|attrs| {
-                attrs
-                    .into_iter()
-                    .find_map(|attr| match attr {
-                        Attribute::Value(v) => Some(zeroize::Zeroizing::new(v)),
-                        _ => None,
-                    })
-                    .ok_or_else(|| {
-                        Error::Pkcs11("CKA_VALUE not present on derived ECDH key".into())
-                    })
-            });
-        let destroyed = session.destroy_object(derived_key);
-
-        // A failed destroy leaves an extractable copy of the shared secret
-        // on the token until the session closes. Fail closed so the caller
-        // learns about it (and can close the session to purge it) rather
-        // than silently continuing; the read secret is zeroized on drop.
-        let mut value = value?;
-        destroyed.map_err(|e| {
-            Error::Pkcs11(format!(
-                "C_DestroyObject failed for derived ECDH key; close the session to purge it: {e}"
-            ))
-        })?;
-        Ok(std::mem::take(&mut *value))
+        read_and_destroy_temporary_secret(
+            || read_secret_value(&session, derived_key, "derived ECDH key"),
+            || {
+                session.destroy_object(derived_key).map_err(|e| {
+                    Error::Pkcs11(format!(
+                        "C_DestroyObject failed for derived ECDH key; close the session to purge it: {e}"
+                    ))
+                })
+            },
+        )
     }
 }
 
@@ -1500,6 +1664,9 @@ impl Pkcs11Cipher {
     ) -> Result<Self> {
         validate_pkcs11_cipher_algorithm(algorithm)?;
         let key_handle = session.find_secret_key(key_label)?;
+        if let CipherAlgorithm::AesGcm(size) = algorithm {
+            session.validate_key(key_handle, TokenKey::Aes(size))?;
+        }
         Ok(Self {
             session: Arc::clone(&session.session),
             key_handle,
@@ -1682,6 +1849,187 @@ mod tests {
         ] {
             for operation in [Operation::Sign(algorithm), Operation::Verify(algorithm)] {
                 assert_unsupported_operation(signature_mechanism(&algorithm, operation), operation);
+            }
+        }
+    }
+
+    #[test]
+    fn token_hashed_signatures_borrow_the_message() {
+        let data = [0x5a; 4096];
+        for algorithm in [
+            SignatureAlgorithm::RsaPkcs1v15(HashAlgorithm::Sha256),
+            SignatureAlgorithm::RsaPss(HashAlgorithm::Sha256),
+            SignatureAlgorithm::Ed25519,
+            SignatureAlgorithm::Hmac(HashAlgorithm::Sha256),
+        ] {
+            let prepared = prepare_sign_data(&algorithm, &data).unwrap();
+            assert!(matches!(prepared, Cow::Borrowed(_)));
+            assert_eq!(prepared.as_ptr(), data.as_ptr());
+            assert_eq!(prepared.as_ref(), data);
+        }
+    }
+
+    #[test]
+    fn ecdsa_signatures_still_hash_the_message() {
+        crate::backend::initialize_backend().expect("backend initialization");
+        let data = b"message hashed before CKM_ECDSA";
+        let algorithm =
+            SignatureAlgorithm::Ecdsa(crate::algorithm::EcCurve::P256, HashAlgorithm::Sha256);
+        let prepared = prepare_sign_data(&algorithm, data).unwrap();
+        assert!(matches!(prepared, Cow::Owned(_)));
+        assert_eq!(
+            prepared.as_ref(),
+            crate::digest::digest(HashAlgorithm::Sha256, data).unwrap()
+        );
+    }
+
+    /// Compares the former preparation helper against the borrowed version,
+    /// excluding token calls, signature output allocation, and session locks.
+    #[test]
+    #[ignore = "local message preparation measurement; run with --ignored --nocapture"]
+    fn signature_message_preparation_measurement() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        fn baseline(algo: &SignatureAlgorithm, data: &[u8]) -> Result<Vec<u8>> {
+            match algo {
+                SignatureAlgorithm::Ecdsa(_, hash) => crate::digest::digest(*hash, data),
+                _ => Ok(data.to_vec()),
+            }
+        }
+
+        let algorithm = SignatureAlgorithm::RsaPss(HashAlgorithm::Sha256);
+        for (bytes, iterations) in [(64, 100_000), (4096, 50_000), (1_048_576, 500)] {
+            let message = vec![0x5a; bytes];
+            for sample in 1..=3 {
+                // Alternate ordering to reduce systematic warm-cache bias.
+                let modes = if sample % 2 == 0 {
+                    [false, true]
+                } else {
+                    [true, false]
+                };
+                for copied in modes {
+                    let start = Instant::now();
+                    for _ in 0..iterations {
+                        if copied {
+                            black_box(
+                                baseline(black_box(&algorithm), black_box(&message)).unwrap(),
+                            );
+                        } else {
+                            black_box(
+                                prepare_sign_data(black_box(&algorithm), black_box(&message))
+                                    .unwrap(),
+                            );
+                        }
+                    }
+                    eprintln!(
+                        "pkcs11_message_preparation sample={sample} baseline_copy={copied} \
+                         bytes={bytes} iterations={iterations} ns_per_operation={:.3}",
+                        start.elapsed().as_nanos() as f64 / iterations as f64
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn temporary_secrets_are_destroyed_on_read_and_cleanup_errors() {
+        use std::cell::Cell;
+
+        for read_ok in [false, true] {
+            for destroy_ok in [false, true] {
+                let read_called = Cell::new(false);
+                let destroy_called = Cell::new(false);
+                let result = read_and_destroy_temporary_secret(
+                    || {
+                        read_called.set(true);
+                        if read_ok {
+                            Ok(Zeroizing::new(vec![0x5a; 32]))
+                        } else {
+                            Err(Error::Pkcs11("synthetic attribute read failure".into()))
+                        }
+                    },
+                    || {
+                        assert!(read_called.get());
+                        destroy_called.set(true);
+                        if destroy_ok {
+                            Ok(())
+                        } else {
+                            Err(Error::Pkcs11(
+                                "synthetic destroy failure; close the session to purge it".into(),
+                            ))
+                        }
+                    },
+                );
+                assert!(destroy_called.get());
+                match (read_ok, destroy_ok) {
+                    (true, true) => assert_eq!(result.unwrap(), [0x5a; 32]),
+                    (_, false) => assert!(result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("close the session to purge it")),
+                    (false, true) => assert!(result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("attribute read failure")),
+                }
+            }
+        }
+    }
+
+    /// Models the session mutex only: no PKCS#11 module, keys, or crypto.
+    /// A 1 ms synthetic token call makes lock serialization observable;
+    /// scheduler delays mean these timings do not predict HSM throughput.
+    #[test]
+    #[ignore = "local mock session contention measurement; run with --ignored --nocapture"]
+    fn mock_session_contention_measurement() {
+        use std::sync::Barrier;
+        use std::time::{Duration, Instant};
+
+        const WORKERS: usize = 4;
+        const OPERATIONS_PER_WORKER: usize = 64;
+        for sample in 1..=3 {
+            for shared in [true, false] {
+                let sessions: Vec<_> = if shared {
+                    let session = Arc::new(Mutex::new(0_usize));
+                    vec![session; WORKERS]
+                } else {
+                    (0..WORKERS)
+                        .map(|_| Arc::new(Mutex::new(0_usize)))
+                        .collect()
+                };
+                let start = Barrier::new(WORKERS + 1);
+                let elapsed = std::thread::scope(|scope| {
+                    for session in &sessions {
+                        let start = &start;
+                        scope.spawn(move || {
+                            start.wait();
+                            for _ in 0..OPERATIONS_PER_WORKER {
+                                let mut guard = session.lock().unwrap();
+                                std::thread::sleep(Duration::from_millis(1));
+                                *guard += 1;
+                            }
+                        });
+                    }
+                    let now = Instant::now();
+                    start.wait();
+                    now
+                })
+                .elapsed();
+                let operations = if shared {
+                    *sessions[0].lock().unwrap()
+                } else {
+                    sessions
+                        .iter()
+                        .map(|session| *session.lock().unwrap())
+                        .sum()
+                };
+                assert_eq!(operations, WORKERS * OPERATIONS_PER_WORKER);
+                eprintln!(
+                    "mock_session_contention sample={sample} shared_session={shared} \
+                     workers={WORKERS} operations={operations} token_latency_ms=1 elapsed_ms={:.3}",
+                    elapsed.as_secs_f64() * 1000.0
+                );
             }
         }
     }
@@ -1895,7 +2243,154 @@ mod tests {
         let len = |n: usize| Attribute::ValueLen(n.try_into().unwrap());
         assert!(check_kek_value_len(&[len(32)], 32).is_ok());
         assert!(check_kek_value_len(&[len(16)], 32).is_err());
-        // Attribute not exposed by the token: fall through.
-        assert!(check_kek_value_len(&[], 32).is_ok());
+        // Unreadable or duplicated parameters cannot attest the key size.
+        assert!(check_kek_value_len(&[], 32).is_err());
+        assert!(check_kek_value_len(&[len(32), len(32)], 32).is_err());
+    }
+
+    #[test]
+    fn token_key_binding_requires_complete_unique_attributes() {
+        use crate::algorithm::EcCurve;
+        let aes = [
+            Attribute::KeyType(KeyType::AES),
+            Attribute::ValueLen(32.into()),
+        ];
+        assert!(validate_token_key_attributes(&aes, TokenKey::Aes(AesKeySize::Aes256)).is_ok());
+        assert!(validate_token_key_attributes(&aes, TokenKey::Aes(AesKeySize::Aes128)).is_err());
+        assert!(validate_token_key_attributes(&aes, TokenKey::Rsa).is_err());
+        for attrs in [
+            vec![],
+            vec![aes[0].clone()],
+            vec![aes[1].clone()],
+            vec![aes[0].clone(), aes[0].clone(), aes[1].clone()],
+        ] {
+            assert!(
+                validate_token_key_attributes(&attrs, TokenKey::Aes(AesKeySize::Aes256)).is_err()
+            );
+        }
+        for (curve, params) in [
+            (EcCurve::P256, OID_DER_P256),
+            (EcCurve::P384, OID_DER_P384),
+            (EcCurve::P521, OID_DER_P521),
+        ] {
+            let attrs = [
+                Attribute::KeyType(KeyType::EC),
+                Attribute::EcParams(params.to_vec()),
+            ];
+            assert!(validate_token_key_attributes(&attrs, TokenKey::Ec(curve)).is_ok());
+            for other in [EcCurve::P256, EcCurve::P384, EcCurve::P521] {
+                assert_eq!(
+                    validate_token_key_attributes(&attrs, TokenKey::Ec(other)).is_ok(),
+                    other == curve
+                );
+            }
+            assert!(validate_token_key_attributes(&attrs[..1], TokenKey::Ec(curve)).is_err());
+        }
+    }
+
+    #[test]
+    fn token_rsa_strength_uses_actual_modulus_not_claimed_bits() {
+        let modulus = |bits: usize| {
+            let mut n = vec![0; bits.div_ceil(8)];
+            n[0] = 1 << ((bits - 1) % 8);
+            *n.last_mut().unwrap() |= 1;
+            Attribute::Modulus(n)
+        };
+        for bits in [1024, 2047, 2048, 2049, 3072] {
+            let attrs = [
+                Attribute::KeyType(KeyType::RSA),
+                modulus(bits),
+                Attribute::ModulusBits(4096.into()),
+            ];
+            let accepted = bits >= 2048 && (!cfg!(feature = "fips") || bits.is_multiple_of(2));
+            assert_eq!(
+                validate_token_key_attributes(&attrs, TokenKey::Rsa).is_ok(),
+                accepted
+            );
+        }
+        let mut n = vec![0x80; 256];
+        assert!(validate_token_key_attributes(
+            &[
+                Attribute::KeyType(KeyType::RSA),
+                Attribute::Modulus(n.clone())
+            ],
+            TokenKey::Rsa
+        )
+        .is_err());
+        *n.last_mut().unwrap() |= 1;
+        n.insert(0, 0);
+        assert!(validate_token_key_attributes(
+            &[Attribute::KeyType(KeyType::RSA), Attribute::Modulus(n)],
+            TokenKey::Rsa
+        )
+        .is_ok());
+        assert!(validate_token_key_attributes(
+            &[
+                Attribute::KeyType(KeyType::RSA),
+                Attribute::ModulusBits(4096.into())
+            ],
+            TokenKey::Rsa
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn token_edwards_and_hmac_parameters_match_the_declared_family() {
+        for params in [
+            b"\x13\x0cedwards25519".as_slice(),
+            &[0x06, 0x03, 0x2b, 0x65, 0x70],
+        ] {
+            assert!(validate_token_key_attributes(
+                &[
+                    Attribute::KeyType(KeyType::EC_EDWARDS),
+                    Attribute::EcParams(params.to_vec())
+                ],
+                TokenKey::Ed25519
+            )
+            .is_ok());
+        }
+        assert!(validate_token_key_attributes(
+            &[
+                Attribute::KeyType(KeyType::EC_EDWARDS),
+                Attribute::EcParams(b"\x13\x0acurve25519".to_vec())
+            ],
+            TokenKey::Ed25519
+        )
+        .is_err());
+        assert!(validate_token_key_attributes(
+            &[Attribute::KeyType(KeyType::GENERIC_SECRET)],
+            TokenKey::HmacSha256
+        )
+        .is_ok());
+        assert!(validate_token_key_attributes(
+            &[Attribute::KeyType(KeyType::SHA256_HMAC)],
+            TokenKey::HmacSha256
+        )
+        .is_err());
+        assert!(validate_token_key_attributes(
+            &[Attribute::KeyType(KeyType::AES)],
+            TokenKey::HmacSha256
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn secret_attribute_extraction_rejects_duplicates_and_moves_owned_value() {
+        let bytes = vec![7; 32];
+        let ptr = bytes.as_ptr();
+        let extracted =
+            extract_secret_value(SecretAttributes(vec![Attribute::Value(bytes)]), "fixture")
+                .unwrap();
+        assert_eq!(extracted.as_ptr(), ptr);
+        assert_eq!(extracted.as_slice(), &[7; 32]);
+        assert!(extract_secret_value(SecretAttributes(vec![]), "fixture").is_err());
+        assert!(extract_secret_value(
+            SecretAttributes(vec![
+                Attribute::Value(vec![1; 32]),
+                Attribute::Value(vec![2; 32])
+            ]),
+            "fixture"
+        )
+        .is_err());
     }
 }

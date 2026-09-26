@@ -462,7 +462,7 @@ fn hash_output_len(hash: HashAlgorithm) -> Option<usize> {
 
 pub mod cipher {
     use crate::algorithm::{AesKeySize, CipherAlgorithm};
-    use crate::backend::{random_bytes, require_supported, Operation};
+    use crate::backend::{require_supported, Operation};
     use crate::error::{Error, Result};
 
     pub fn encrypt(algorithm: CipherAlgorithm, key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
@@ -538,12 +538,9 @@ pub mod cipher {
         if !matches!(size, AesKeySize::Aes192) {
             return aws_gcm_encrypt_random_nonce(size, key, plaintext);
         }
-        let nonce = random_bytes(12)?;
-        let sealed = aws_gcm_encrypt(size, key, &nonce, plaintext)?;
-        let mut output = Vec::with_capacity(12 + sealed.len());
-        output.extend_from_slice(&nonce);
-        output.extend_from_slice(&sealed);
-        Ok(output)
+        let mut nonce = [0u8; 12];
+        crate::backend::fill_random(&mut nonce)?;
+        aws_gcm_encrypt(size, key, &nonce, plaintext)
     }
 
     /// Seal with a nonce generated inside the AWS-LC module, which is the
@@ -557,14 +554,17 @@ pub mod cipher {
         use aws_lc_rs::aead::{Aad, RandomizedNonceKey};
         let key = RandomizedNonceKey::new(aws_gcm_algorithm(size), key)
             .map_err(|_| Error::Crypto("AWS-LC AES-GCM setup failed".into()))?;
-        let mut sealed = plaintext.to_vec();
-        let nonce = key
-            .seal_in_place_append_tag(Aad::empty(), &mut sealed)
+        // Reserve the complete wire format before copying plaintext so tag
+        // appending cannot leave a secret copy in a reallocated buffer.
+        let mut output = zeroize::Zeroizing::new(Vec::with_capacity(28 + plaintext.len()));
+        output.extend_from_slice(&[0u8; 12]);
+        output.extend_from_slice(plaintext);
+        let (nonce, tag) = key
+            .seal_in_place_separate_tag(Aad::empty(), &mut output[12..])
             .map_err(|_| Error::Crypto("AWS-LC AES-GCM encryption failed".into()))?;
-        let mut output = Vec::with_capacity(12 + sealed.len());
-        output.extend_from_slice(nonce.as_ref());
-        output.extend_from_slice(&sealed);
-        Ok(output)
+        output[..12].copy_from_slice(nonce.as_ref());
+        output.extend_from_slice(tag.as_ref());
+        Ok(std::mem::take(&mut *output))
     }
 
     fn gcm_decrypt(size: AesKeySize, key: &[u8], input: &[u8]) -> Result<Vec<u8>> {
@@ -595,12 +595,17 @@ pub mod cipher {
             UnboundKey::new(aws_gcm_algorithm(size), key)
                 .map_err(|_| Error::Crypto("AWS-LC AES-GCM setup failed".into()))?,
         );
-        let nonce = Nonce::try_assume_unique_for_key(nonce)
+        let nonce_bytes = nonce;
+        let nonce = Nonce::try_assume_unique_for_key(nonce_bytes)
             .map_err(|_| Error::Crypto("AWS-LC AES-GCM nonce failed".into()))?;
-        let mut output = plaintext.to_vec();
-        key.seal_in_place_append_tag(nonce, Aad::empty(), &mut output)
+        let mut output = zeroize::Zeroizing::new(Vec::with_capacity(28 + plaintext.len()));
+        output.extend_from_slice(nonce_bytes);
+        output.extend_from_slice(plaintext);
+        let tag = key
+            .seal_in_place_separate_tag(nonce, Aad::empty(), &mut output[12..])
             .map_err(|_| Error::Crypto("AWS-LC AES-GCM encryption failed".into()))?;
-        Ok(output)
+        output.extend_from_slice(tag.as_ref());
+        Ok(std::mem::take(&mut *output))
     }
 
     fn aws_gcm_decrypt(
@@ -616,11 +621,13 @@ pub mod cipher {
         );
         let nonce = Nonce::try_assume_unique_for_key(nonce)
             .map_err(|_| Error::Crypto("AWS-LC AES-GCM nonce failed".into()))?;
-        let mut output = sealed.to_vec();
-        let plaintext = key
+        let mut output = zeroize::Zeroizing::new(sealed.to_vec());
+        let plaintext_len = key
             .open_in_place(nonce, Aad::empty(), &mut output)
-            .map_err(|_| Error::Crypto("AWS-LC AES-GCM authentication failed".into()))?;
-        Ok(plaintext.to_vec())
+            .map_err(|_| Error::Crypto("AWS-LC AES-GCM authentication failed".into()))?
+            .len();
+        output.truncate(plaintext_len);
+        Ok(std::mem::take(&mut *output))
     }
 }
 
@@ -712,14 +719,20 @@ pub mod keywrap {
         };
         let kek = AesKek::new(cipher, key)
             .map_err(|_| Error::Crypto("AWS-LC AES-KW setup failed".into()))?;
-        let mut output = vec![0u8; if wrap { data.len() + 8 } else { data.len() - 8 }];
-        let output = if wrap {
+        let mut output =
+            zeroize::Zeroizing::new(vec![
+                0u8;
+                if wrap { data.len() + 8 } else { data.len() - 8 }
+            ]);
+        let output_len = if wrap {
             kek.wrap(data, &mut output)
         } else {
             kek.unwrap(data, &mut output)
         }
-        .map_err(|_| Error::Crypto("AWS-LC AES-KW operation failed".into()))?;
-        Ok(output.to_vec())
+        .map_err(|_| Error::Crypto("AWS-LC AES-KW operation failed".into()))?
+        .len();
+        output.truncate(output_len);
+        Ok(std::mem::take(&mut *output))
     }
 }
 

@@ -538,7 +538,8 @@ fn key_wrapper_matches_software(setup: &Pkcs11, slot: Slot, session: &Pkcs11Sess
             .err()
             .expect("a KEK whose CKA_VALUE_LEN differs from the declared size is rejected");
         assert!(
-            error.to_string().contains("KEK length mismatch"),
+            error.to_string().contains("AES length mismatch")
+                && error.to_string().contains("CKA_VALUE_LEN"),
             "{label}: {error}"
         );
     }

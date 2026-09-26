@@ -5,6 +5,49 @@ riptering is Rhein Industries' maintained fork of
 from 0.6.0 on describe riptering. The history of kryptering up to 0.5.0, the
 release riptering was forked from, is kept unchanged below.
 
+## Unreleased
+
+## 0.7.0 — 2026-09-26
+
+- **Security compatibility change:** Refuse RustCrypto RSA-OAEP and PKCS#1 v1.5 decryption by default, before key
+  or input access. A separate off-by-default `legacy-rsa-decryption` feature
+  restores compatibility while retaining the unpatched RUSTSEC-2023-0071
+  timing risk; `legacy` alone does not enable it. Encryption, signatures,
+  AWS-LC and PKCS#11 policies are unchanged. Capability queries distinguish
+  encryption from decryption, and opted-in decryption enables exponent blinding.
+- Bind imported X25519 private/public components on both providers; mismatched
+  supplied public metadata now rejects.
+- Require readable, unique PKCS#11 key type and parameter attributes matching
+  the declared RSA/EC/AES/HMAC operation. RSA moduli must be at least 2048 bits,
+  AES lengths and EC curves must match, and ECDH length must match its curve.
+  Tokens that hide required parameters now fail closed.
+- Blind RustCrypto RSA private exponentiation for both PKCS#1 v1.5 and PSS
+  signing. Signature encodings are unchanged; this does not resolve the
+  upstream RSA timing advisory.
+- Enable the already-used GHASH/POLYVAL zeroization features and guard
+  PKCS#11 value-attribute copies on error and unwind paths. Internal cryptoki
+  retrieval copies remain an upstream limitation.
+- Enforce AWS-LC's FIPS HKDF parameter requirements: nonempty `info` and
+  no explicitly empty salt. Non-FIPS HKDF retains RFC 5869 compatibility.
+- Refuse software AES-192-GCM decryption and odd-bit RSA imports in FIPS builds,
+  matching the pinned module's service approval conditions. Non-FIPS
+  interoperability remains available.
+- Refuse software RSA key transport in FIPS builds because the pinned
+  implementation is outside the validated module. Software capability
+  approval flags now reflect this; PKCS#11 retains its separate token policy.
+- Enable secret wiping in the existing AES, AES-KW, CBC, 3DES and SLH-DSA
+  dependencies; wipe additional KDF, CBC and post-quantum seed intermediates.
+- Correct RustCrypto OAEP and legacy PBKDF2 capability reporting to match
+  implemented digest combinations. Route ML-KEM initialization and entropy
+  through the selected provider boundary.
+- Surface PKCS#11 temporary-object cleanup failures when reading also fails,
+  and borrow token-hashed signature messages instead of copying them.
+- Reduce AWS-LC GCM and AES-KW buffer allocations while retaining the wire
+  formats, authentication checks and module-generated GCM nonces. Local
+  measurements and workloads are in [docs/performance.md](docs/performance.md).
+- Document that hazmat finite-field DH requires independently validated
+  prime group parameters and protocol-appropriate strength.
+
 ## 0.6.2 — 2026-09-24
 
 - RSA keys below 2048 bits are refused when they are used (signing,

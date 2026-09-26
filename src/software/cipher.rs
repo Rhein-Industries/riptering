@@ -163,7 +163,7 @@ fn triple_des_cbc_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     let mut iv = [0u8; 8];
     crate::backend::fill_random(&mut iv)?;
 
-    let mut buf = pkcs7_pad(plaintext, 8);
+    let mut buf = zeroize::Zeroizing::new(pkcs7_pad(plaintext, 8));
     let buf_len = buf.len();
 
     let enc = cbc::Encryptor::<des::TdesEde3>::new_from_slices(key, &iv)
@@ -194,7 +194,7 @@ fn triple_des_cbc_decrypt(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     }
 
     let iv = &data[..8];
-    let mut buf = data[8..].to_vec();
+    let mut buf = zeroize::Zeroizing::new(data[8..].to_vec());
 
     let dec = cbc::Decryptor::<des::TdesEde3>::new_from_slices(key, iv)
         .map_err(|e| Error::Crypto(format!("3DES init: {e}")))?;
