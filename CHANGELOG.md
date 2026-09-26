@@ -7,7 +7,9 @@ release riptering was forked from, is kept unchanged below.
 
 ## Unreleased
 
-- Refuse RustCrypto RSA-OAEP and PKCS#1 v1.5 decryption by default, before key
+## 0.7.0 — 2026-09-26
+
+- **Security compatibility change:** Refuse RustCrypto RSA-OAEP and PKCS#1 v1.5 decryption by default, before key
   or input access. A separate off-by-default `legacy-rsa-decryption` feature
   restores compatibility while retaining the unpatched RUSTSEC-2023-0071
   timing risk; `legacy` alone does not enable it. Encryption, signatures,

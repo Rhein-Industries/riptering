@@ -1,6 +1,6 @@
 [package]
 name = "riptering"
-version = "0.6.2"
+version = "0.7.0"
 edition = "2021"
 # riptering is Rhein Industries' maintained fork of kryptering by Kushal Das
 # (https://github.com/kushaldas/kryptering); see README.md and LICENSE.
