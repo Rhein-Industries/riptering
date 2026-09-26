@@ -59,9 +59,9 @@ general fix, we intend to offer it to kryptering as well.
 
 ```toml
 [dependencies]
-riptering = "0.6"
+riptering = "0.7"
 # or keep the `kryptering::` paths in your code:
-# kryptering = { package = "riptering", version = "0.6" }
+# kryptering = { package = "riptering", version = "0.7" }
 ```
 
 With the plain `riptering` dependency, replace `kryptering::` with
