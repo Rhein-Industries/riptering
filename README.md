@@ -1,72 +1,9 @@
 # riptering
 
-> **Fork notice.** riptering is Rhein Industries' actively maintained fork of
-> [kryptering](https://github.com/kushaldas/kryptering) by Kushal Das. It
-> starts from kryptering 0.5.0 (upstream commit `cb733df`) and keeps
-> kryptering's BSD-2-Clause license and copyright notice. riptering is **not
-> affiliated with or endorsed by** the upstream author: please report
-> problems with riptering to Rhein Industries, not to the kryptering project.
->
-> - Bugs and feature requests:
->   <https://github.com/Rhein-Industries/riptering/issues>
-> - Security problems: report them privately as described in
->   [SECURITY.md](SECURITY.md); do not open a public issue.
-
 riptering is a compile-time cryptographic provider boundary: one
 provider-neutral API for signatures, encryption, key wrap, key agreement and
 KDFs over a software provider chosen at build time (RustCrypto or AWS-LC) and
 over PKCS#11 HSMs. Requires Rust 1.88 or later.
-
-## How riptering differs from kryptering 0.5.0
-
-- **Name.** The crate is `riptering` (`use riptering::...`). Error messages
-  say "riptering", and the SoftHSM2 test variable is
-  `RIPTERING_TEST_SOFTHSM2_MODULE`.
-- **Platform.** The non-FIPS AWS-LC provider also builds on macOS
-  x86_64/aarch64. FIPS stays Linux-only. This is not a claim of FIPS
-  certification.
-- **Provider parity.** The RustCrypto and AWS-LC providers accept the same
-  ECDSA signature encodings, refuse to sign, verify or transport keys with RSA keys below 2048 bits
-  (RustCrypto accepts them only with `legacy`, for historical
-  interoperability; FIPS builds refuse them already at import),
-  restrict raw key import to symmetric families, check key types for
-  X25519/ECDH, and share `Pbkdf2Params::recommended(hash, salt, key_length)`
-  (a breaking change for AWS-LC callers, which previously passed no hash).
-  AWS-LC verifies the cross curve/digest ECDSA pairs XML-DSig produces.
-- **FIPS (AWS-LC).** PBKDF2, HKDF and ConcatKDF use the AWS-LC module
-  implementations; PBKDF2 enforces the SP 800-132 minimums; AES-128/256-GCM
-  nonces are generated inside the module; AES-192-GCM operations and SHA-224
-  PBKDF2/HKDF are not reported as approved.
-- **RustCrypto hardening.** AES-CBC and AES-KW length checks, a bounded
-  RSA-PSS salt length, DH group and exponent validation, post-quantum import
-  pair checks, and zeroization of additional secret intermediates.
-- **PKCS#11.** Concurrent sessions on one token, with the PIN of a session
-  joining an existing login verified against the login riptering performed
-  (three mismatches lock further joins); raw-byte PINs; KEK length checks;
-  AES key wrap through `C_WrapKey`/`C_UnwrapKey` where the token only offers
-  those; the FIPS ECDH curve read from `CKA_EC_PARAMS`; derived ECDH secrets
-  are session objects that are always destroyed.
-- **Dependencies and CI.** `rustls` >= 0.23.45 (RUSTSEC-2026-0285) and
-  `cryptoki` >= 0.12.1 (RUSTSEC-2026-0286). CI tests every provider,
-  PKCS#11 against SoftHSM2, the Linux FIPS build and macOS on GitHub-hosted
-  runners; `tests/provider_parity.rs` runs the same cases against every
-  provider, including FIPS.
-
-The full list is in the [changelog](CHANGELOG.md). Where a change is a
-general fix, we intend to offer it to kryptering as well.
-
-### Migrating from kryptering
-
-```toml
-[dependencies]
-riptering = "0.7"
-# or keep the `kryptering::` paths in your code:
-# kryptering = { package = "riptering", version = "0.7" }
-```
-
-With the plain `riptering` dependency, replace `kryptering::` with
-`riptering::` in your code. AWS-LC callers of `Pbkdf2Params::recommended`
-pass the hash algorithm as the new first argument.
 
 ## Features
 
@@ -208,11 +145,63 @@ let signature = signer.sign(b"data to sign").unwrap();
 
 ## Contributing and security
 
+Report bugs and feature requests in [GitHub Issues](https://github.com/Rhein-Industries/riptering/issues).
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the local check matrix and
 [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 
+## Compatibility and migration
+
+- **Name.** The crate is `riptering` (`use riptering::...`). Error messages
+  say "riptering", and the SoftHSM2 test variable is
+  `RIPTERING_TEST_SOFTHSM2_MODULE`.
+- **Platform.** The non-FIPS AWS-LC provider also builds on macOS
+  x86_64/aarch64. FIPS stays Linux-only. This is not a claim of FIPS
+  certification.
+- **Provider parity.** The RustCrypto and AWS-LC providers accept the same
+  ECDSA signature encodings, refuse to sign, verify or transport keys with RSA keys below 2048 bits
+  (RustCrypto accepts them only with `legacy`, for historical
+  interoperability; FIPS builds refuse them already at import),
+  restrict raw key import to symmetric families, check key types for
+  X25519/ECDH, and share `Pbkdf2Params::recommended(hash, salt, key_length)`
+  (a breaking change for AWS-LC callers, which previously passed no hash).
+  AWS-LC verifies the cross curve/digest ECDSA pairs XML-DSig produces.
+- **FIPS (AWS-LC).** PBKDF2, HKDF and ConcatKDF use the AWS-LC module
+  implementations; PBKDF2 enforces the SP 800-132 minimums; AES-128/256-GCM
+  nonces are generated inside the module; AES-192-GCM operations and SHA-224
+  PBKDF2/HKDF are not reported as approved.
+- **RustCrypto hardening.** AES-CBC and AES-KW length checks, a bounded
+  RSA-PSS salt length, DH group and exponent validation, post-quantum import
+  pair checks, and zeroization of additional secret intermediates.
+- **PKCS#11.** Concurrent sessions on one token, with the PIN of a session
+  joining an existing login verified against the login riptering performed
+  (three mismatches lock further joins); raw-byte PINs; KEK length checks;
+  AES key wrap through `C_WrapKey`/`C_UnwrapKey` where the token only offers
+  those; the FIPS ECDH curve read from `CKA_EC_PARAMS`; derived ECDH secrets
+  are session objects that are always destroyed.
+- **Dependencies and CI.** `rustls` >= 0.23.45 (RUSTSEC-2026-0285) and
+  `cryptoki` >= 0.12.1 (RUSTSEC-2026-0286). CI tests every provider,
+  PKCS#11 against SoftHSM2, the Linux FIPS build and macOS on GitHub-hosted
+  runners; `tests/provider_parity.rs` runs the same cases against every
+  provider, including FIPS.
+
+The full list is in the [changelog](CHANGELOG.md). Where a change is a
+general fix, we intend to offer it to kryptering as well.
+
+### Migrating from kryptering
+
+```toml
+[dependencies]
+riptering = "0.7"
+# or keep the `kryptering::` paths in your code:
+# kryptering = { package = "riptering", version = "0.7" }
+```
+
+With the plain `riptering` dependency, replace `kryptering::` with
+`riptering::` in your code. AWS-LC callers of `Pbkdf2Params::recommended`
+pass the hash algorithm as the new first argument.
+
 ## License
 
-BSD-2-Clause, see [LICENSE](LICENSE). riptering retains kryptering's
-copyright notice (Copyright (c) 2025, Kushal Das) and adds Rhein Industries'
-notice for the fork's modifications.
+BSD-2-Clause, see [LICENSE](LICENSE).[^history]
+
+[^history]: riptering started from [kryptering](https://github.com/kushaldas/kryptering) 0.5.0 by Kushal Das (upstream commit `cb733df`). The original copyright and license notices are retained in LICENSE.
