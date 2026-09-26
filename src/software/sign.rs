@@ -487,7 +487,7 @@ fn validate_verifying_key(algorithm: &SignatureAlgorithm, key: &SoftwareKey) -> 
 // ── RSA PKCS#1 v1.5 ────────────────────────────────────────────────
 
 fn rsa_pkcs1v15_sign(key: &SoftwareKey, hash: HashAlgorithm, data: &[u8]) -> Result<Vec<u8>> {
-    use signature::Signer;
+    use signature::RandomizedSigner;
     let SoftwareKey::Rsa {
         private: Some(private_key),
         ..
@@ -495,10 +495,15 @@ fn rsa_pkcs1v15_sign(key: &SoftwareKey, hash: HashAlgorithm, data: &[u8]) -> Res
     else {
         return Err(Error::Key("RSA private key required".into()));
     };
+    // Randomness blinds the private exponentiation; PKCS#1 v1.5 signature
+    // bytes remain deterministic. This does not close RUSTSEC-2023-0071.
+    let mut rng = rand::rngs::OsRng;
     macro_rules! do_sign {
         ($hasher:ty) => {{
             let sk = rsa::pkcs1v15::SigningKey::<$hasher>::new(private_key.clone());
-            Ok(sk.sign(data).to_vec())
+            sk.try_sign_with_rng(&mut rng, data)
+                .map(|signature| signature.to_vec())
+                .map_err(|e| Error::Crypto(format!("RSA PKCS#1 signing failed: {e}")))
         }};
     }
     dispatch_hash!(hash, do_sign)
@@ -541,9 +546,12 @@ fn rsa_pss_sign(key: &SoftwareKey, hash: HashAlgorithm, data: &[u8]) -> Result<V
     let mut rng = rand::rngs::OsRng;
     macro_rules! do_sign {
         ($hasher:ty) => {{
-            let sk = rsa::pss::SigningKey::<$hasher>::new(private_key.clone());
-            let sig = sk.sign_with_rng(&mut rng, data);
-            Ok(sig.to_vec())
+            // Unlike SigningKey, BlindedSigningKey also randomizes the
+            // private exponentiation, independently of the PSS salt.
+            let sk = rsa::pss::BlindedSigningKey::<$hasher>::new(private_key.clone());
+            sk.try_sign_with_rng(&mut rng, data)
+                .map(|signature| signature.to_vec())
+                .map_err(|e| Error::Crypto(format!("RSA-PSS signing failed: {e}")))
         }};
     }
     dispatch_hash!(hash, do_sign)
@@ -1032,8 +1040,10 @@ pub fn generate_ml_dsa(variant: crate::algorithm::MlDsaVariant) -> Result<Opaque
     }
 
     let build = || -> Result<Vec<u8>> {
-        let seed = ml_dsa::Seed::try_from(private_der.as_slice())
-            .map_err(|e| Error::Crypto(format!("ML-DSA seed construction failed: {e}")))?;
+        let seed = zeroize::Zeroizing::new(
+            ml_dsa::Seed::try_from(private_der.as_slice())
+                .map_err(|e| Error::Crypto(format!("ML-DSA seed construction failed: {e}")))?,
+        );
         match variant {
             MlDsaVariant::MlDsa44 => encode_public::<ml_dsa::MlDsa44>(&seed),
             MlDsaVariant::MlDsa65 => encode_public::<ml_dsa::MlDsa65>(&seed),
@@ -1269,8 +1279,10 @@ where
     }
     // Fall back to 32-byte seed (from OpenSSL format, extracted by loader)
     if private_der.len() == 32 {
-        let seed = ml_dsa::Seed::try_from(private_der)
-            .map_err(|_| Error::Key("invalid ML-DSA seed length".into()))?;
+        let seed = zeroize::Zeroizing::new(
+            ml_dsa::Seed::try_from(private_der)
+                .map_err(|_| Error::Key("invalid ML-DSA seed length".into()))?,
+        );
         return Ok(ml_dsa::ExpandedSigningKey::<P>::from_seed(&seed));
     }
     Err(Error::Key(format!(
@@ -1299,6 +1311,14 @@ where
 mod tests {
     use super::*;
     use crate::traits::{Signer, Verifier};
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn temporary_ml_dsa_signing_material_zeroizes_on_drop() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<zeroize::Zeroizing<ml_dsa::Seed>>();
+        assert_zeroize_on_drop::<ml_dsa::ExpandedSigningKey<ml_dsa::MlDsa44>>();
+    }
 
     #[test]
     fn ed25519_roundtrip() {

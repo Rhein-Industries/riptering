@@ -80,16 +80,19 @@ pub fn derive(
     input.extend_from_slice(&password);
 
     let blocks = output_len.div_ceil(u);
-    let mut output = Vec::with_capacity(blocks * u);
+    let mut output = Zeroizing::new(Vec::with_capacity(output_len));
     for block in 0..blocks {
         let mut material = Zeroizing::new(Vec::with_capacity(d.len() + input.len()));
         material.extend_from_slice(&d);
         material.extend_from_slice(&input);
         let mut a = Zeroizing::new(crate::digest::digest(hash, &material)?);
         for _ in 1..iterations {
-            *a = crate::digest::digest(hash, &a)?;
+            // Replace the wrapper so the previous digest is wiped before
+            // its allocation is freed, including on a later derivation error.
+            a = Zeroizing::new(crate::digest::digest(hash, &a)?);
         }
-        output.extend_from_slice(&a);
+        let remaining = output_len - output.len();
+        output.extend_from_slice(&a[..remaining.min(a.len())]);
         if block + 1 < blocks {
             let b = Zeroizing::new(extend_to_multiple(&a, v));
             for chunk in input.chunks_mut(v) {
@@ -97,8 +100,7 @@ pub fn derive(
             }
         }
     }
-    output.truncate(output_len);
-    Ok(output)
+    Ok(std::mem::take(&mut *output))
 }
 
 #[cfg(feature = "legacy")]

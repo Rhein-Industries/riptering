@@ -24,13 +24,14 @@
 //!
 //! # Randomness and secret hygiene
 //!
-//! Key generation and encapsulation draw entropy via [`getrandom::fill`]
-//! so OS-RNG failure surfaces as [`Error::Crypto`] instead of a panic (see
+//! Key generation and encapsulation draw entropy through the selected
+//! provider's OS-backed RNG so failure surfaces as [`Error::Crypto`] (see
 //! `docs/adr/0001-rng-choice.md`). Returned shared secrets are wrapped in
 //! [`Zeroizing`] so they are wiped on drop; borrow (`&secret`) when deriving
 //! keys rather than moving the bytes out of the wrapper.
 
 use crate::algorithm::{KemAlgorithm, MlKemVariant, PqAlgorithm};
+use crate::backend::{fill_random, require_supported, Operation};
 use crate::error::{Error, Result};
 use crate::key::{RustCryptoKey as SoftwareKey, SoftwareKey as OpaqueSoftwareKey};
 use crate::traits;
@@ -67,6 +68,7 @@ impl SoftwareEncapsulator {
     /// [`PqAlgorithm::MlKem`] algorithm; anything else returns
     /// [`Error::Key`]. A public-only key (no `private_der`) is sufficient.
     pub fn new<K: Into<OpaqueSoftwareKey>>(variant: MlKemVariant, key: K) -> Result<Self> {
+        require_supported(Operation::KemEncapsulate(KemAlgorithm::MlKem(variant)))?;
         let key = key.into();
         validate_ml_kem_key(variant, key.inner(), false)?;
         Ok(Self { variant, key })
@@ -79,6 +81,7 @@ impl traits::Encapsulator for SoftwareEncapsulator {
     }
 
     fn encapsulate(&self) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>)> {
+        require_supported(Operation::KemEncapsulate(self.algorithm()))?;
         let SoftwareKey::PostQuantum { public_der, .. } = self.key.inner() else {
             // validate_ml_kem_key enforced this in `new`.
             return Err(Error::Key("ML-KEM key required".into()));
@@ -102,6 +105,7 @@ impl SoftwareDecapsulator {
     /// [`PqAlgorithm::MlKem`] algorithm and private key material present;
     /// anything else returns [`Error::Key`].
     pub fn new<K: Into<OpaqueSoftwareKey>>(variant: MlKemVariant, key: K) -> Result<Self> {
+        require_supported(Operation::KemDecapsulate(KemAlgorithm::MlKem(variant)))?;
         let key = key.into();
         validate_ml_kem_key(variant, key.inner(), true)?;
         Ok(Self { variant, key })
@@ -114,6 +118,7 @@ impl traits::Decapsulator for SoftwareDecapsulator {
     }
 
     fn decapsulate(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        require_supported(Operation::KemDecapsulate(self.algorithm()))?;
         let SoftwareKey::PostQuantum {
             private_der: Some(private),
             ..
@@ -186,9 +191,9 @@ fn ml_kem_encapsulate(
             // a panic (ADR 0001). `m` must be fresh on every call and never
             // reused — it is wiped below as soon as it has been consumed.
             let mut m = ml_kem::B32::default();
-            if let Err(e) = getrandom::fill(m.as_mut_slice()) {
+            if let Err(error) = fill_random(m.as_mut_slice()) {
                 m.as_mut_slice().zeroize();
-                return Err(Error::Crypto(format!("OS entropy draw failed: {e}")));
+                return Err(error);
             }
             let (ct, mut ss) = ek.encapsulate_deterministic(&m);
             m.as_mut_slice().zeroize();
@@ -309,7 +314,7 @@ pub(crate) fn validate_import(
 /// 64-byte FIPS 203 seed (`d || z`) and whose `public_der` holds the
 /// encapsulation key as SPKI DER.
 ///
-/// Entropy comes from [`getrandom::fill`]; an OS-RNG failure returns
+/// Entropy comes from the selected provider's OS-backed RNG; a failure returns
 /// [`Error::Crypto`] rather than panicking (see
 /// `docs/adr/0001-rng-choice.md`).
 ///
@@ -324,10 +329,11 @@ pub fn generate_ml_kem(variant: MlKemVariant) -> Result<OpaqueSoftwareKey> {
     use pkcs8_pq::spki::EncodePublicKey;
     use zeroize::Zeroize;
 
+    require_supported(Operation::KemGenerate(KemAlgorithm::MlKem(variant)))?;
     let mut seed_bytes = [0u8; 64];
-    if let Err(e) = getrandom::fill(&mut seed_bytes) {
+    if let Err(error) = fill_random(&mut seed_bytes) {
         seed_bytes.zeroize();
-        return Err(Error::Crypto(format!("OS entropy draw failed: {e}")));
+        return Err(error);
     }
 
     // Copy the seed into a heap-owned Vec now so every subsequent error

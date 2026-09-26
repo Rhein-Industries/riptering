@@ -272,6 +272,17 @@ fn rsa_signatures_and_transport_use_opaque_imported_keys() {
             .sign(b"provider signature baseline")
             .unwrap();
         let verifier = SoftwareVerifier::new(algorithm, public_key.clone()).unwrap();
+        if matches!(algorithm, SignatureAlgorithm::RsaPkcs1v15(_)) {
+            // Exponent blinding changes internal arithmetic, not deterministic
+            // PKCS#1 v1.5 signature bytes.
+            assert_eq!(
+                SoftwareSigner::new(algorithm, private_key.clone())
+                    .unwrap()
+                    .sign(b"provider signature baseline")
+                    .unwrap(),
+                signature
+            );
+        }
         assert!(verifier
             .verify(b"provider signature baseline", &signature)
             .unwrap());
@@ -279,6 +290,18 @@ fn rsa_signatures_and_transport_use_opaque_imported_keys() {
     }
 
     let algorithm = KeyTransportAlgorithm::RsaOaep(OaepConfig::default());
+    if cfg!(feature = "fips") {
+        // Generic RSA transport lives outside the pinned AWS-LC module.
+        assert_refused(
+            riptering::keytransport::kt_encrypt(algorithm, &public_key, b"synthetic key", None),
+            Operation::TransportEncrypt(algorithm),
+        );
+        assert_refused(
+            riptering::keytransport::kt_decrypt(algorithm, &private_key, &[0; 256], None),
+            Operation::TransportDecrypt(algorithm),
+        );
+        return;
+    }
     let encrypted = riptering::keytransport::kt_encrypt(
         algorithm,
         &public_key,
@@ -286,6 +309,21 @@ fn rsa_signatures_and_transport_use_opaque_imported_keys() {
         Some(b"provider-baseline"),
     )
     .unwrap();
+    if cfg!(all(
+        feature = "rustcrypto",
+        not(feature = "legacy-rsa-decryption")
+    )) {
+        assert_refused(
+            riptering::keytransport::kt_decrypt(
+                algorithm,
+                &private_key,
+                &encrypted,
+                Some(b"provider-baseline"),
+            ),
+            Operation::TransportDecrypt(algorithm),
+        );
+        return;
+    }
     assert_eq!(
         riptering::keytransport::kt_decrypt(
             algorithm,

@@ -1,4 +1,4 @@
-//! Cases that must behave identically under every document provider.
+//! Common cases and explicit policy differences under every document provider.
 //!
 //! Each test runs against whichever provider the build selects, so CI runs
 //! this file once per provider feature set. FIPS builds run every case too:
@@ -79,6 +79,10 @@ fn x25519_agreement_matches_rfc7748_and_checks_key_type() {
             shared
         );
         let alice = SoftwareKey::from_x25519(Some(&alice_private), &alice_public).unwrap();
+        assert_eq!(alice.public_component().unwrap(), alice_public);
+        assert!(SoftwareKey::from_x25519(Some(&alice_private), &bob_public).is_err());
+        assert!(SoftwareKey::from_x25519(Some(&alice_private), &[0; 32]).is_err());
+        assert!(SoftwareKey::from_x25519(None, &bob_public).is_ok());
         assert_eq!(
             riptering::keyagreement::agree_x25519(&bob_public, &alice).unwrap(),
             shared
@@ -111,6 +115,237 @@ fn signers_reject_keys_of_another_family() {
             SoftwareVerifier::new(SignatureAlgorithm::Ed25519, hmac),
             Operation::Verify(SignatureAlgorithm::Ed25519),
         );
+    }
+}
+
+#[test]
+fn oaep_capabilities_reject_unimplemented_hashes_before_key_use() {
+    use riptering::{KeyTransportAlgorithm, OaepConfig};
+
+    riptering::initialize_backend().expect("provider initialization");
+    let wrong_key = SoftwareKey::from_symmetric_bytes(KeyAlgorithm::Hmac, b"secret").unwrap();
+    let registry = riptering::capabilities().unwrap();
+    let mut unsupported = Vec::new();
+    for hash in [
+        HashAlgorithm::Sha3_224,
+        HashAlgorithm::Sha3_256,
+        HashAlgorithm::Sha3_384,
+        HashAlgorithm::Sha3_512,
+    ] {
+        unsupported.push(OaepConfig {
+            digest: hash,
+            mgf_digest: HashAlgorithm::Sha256,
+        });
+        unsupported.push(OaepConfig {
+            digest: HashAlgorithm::Sha256,
+            mgf_digest: hash,
+        });
+    }
+    #[cfg(feature = "legacy")]
+    for hash in [HashAlgorithm::Md5, HashAlgorithm::Ripemd160] {
+        unsupported.push(OaepConfig {
+            digest: HashAlgorithm::Sha256,
+            mgf_digest: hash,
+        });
+    }
+    for config in unsupported {
+        let algorithm = KeyTransportAlgorithm::RsaOaep(config);
+        let encrypt = Operation::TransportEncrypt(algorithm);
+        let decrypt = Operation::TransportDecrypt(algorithm);
+        for operation in [encrypt, decrypt] {
+            assert!(!riptering::supports(operation).unwrap(), "{operation:?}");
+            assert!(!registry.iter().any(|entry| entry.operation == operation));
+        }
+        // A rejected parameter pair must fail before this wrong-family key
+        // could produce Error::Key or cause any key material to be used.
+        assert_refused(
+            riptering::keytransport::kt_encrypt(algorithm, &wrong_key, b"key", None),
+            encrypt,
+        );
+        assert_refused(
+            riptering::keytransport::kt_decrypt(algorithm, &wrong_key, b"ciphertext", None),
+            decrypt,
+        );
+    }
+}
+
+#[test]
+fn oaep_independent_mgf_support_matches_actual_operations() {
+    use riptering::{KeyTransportAlgorithm, OaepConfig};
+
+    riptering::initialize_backend().expect("provider initialization");
+    let algorithm = KeyTransportAlgorithm::RsaOaep(OaepConfig {
+        digest: HashAlgorithm::Sha256,
+        mgf_digest: HashAlgorithm::Sha384,
+    });
+    assert_eq!(
+        riptering::supports(Operation::TransportEncrypt(algorithm)).unwrap(),
+        cfg!(feature = "rustcrypto")
+    );
+    assert_eq!(
+        riptering::supports(Operation::TransportDecrypt(algorithm)).unwrap(),
+        cfg!(all(
+            feature = "rustcrypto",
+            feature = "legacy-rsa-decryption"
+        ))
+    );
+    #[cfg(feature = "rustcrypto")]
+    {
+        use rsa::pkcs8::EncodePrivateKey;
+
+        let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).unwrap();
+        let key = SoftwareKey::from_pkcs8_der(
+            KeyAlgorithm::Rsa,
+            private.to_pkcs8_der().unwrap().as_bytes(),
+        )
+        .unwrap();
+        let wrapped =
+            riptering::keytransport::kt_encrypt(algorithm, &key, b"synthetic key", None).unwrap();
+        let decrypted = riptering::keytransport::kt_decrypt(algorithm, &key, &wrapped, None);
+        if cfg!(feature = "legacy-rsa-decryption") {
+            assert_eq!(decrypted.unwrap(), b"synthetic key");
+        } else {
+            assert_refused(decrypted, Operation::TransportDecrypt(algorithm));
+        }
+    }
+    #[cfg(feature = "aws-lc")]
+    {
+        let wrong_key = SoftwareKey::from_symmetric_bytes(KeyAlgorithm::Hmac, b"secret").unwrap();
+        assert_refused(
+            riptering::keytransport::kt_encrypt(algorithm, &wrong_key, b"key", None),
+            Operation::TransportEncrypt(algorithm),
+        );
+        assert_refused(
+            riptering::keytransport::kt_decrypt(algorithm, &wrong_key, b"ciphertext", None),
+            Operation::TransportDecrypt(algorithm),
+        );
+    }
+}
+
+#[test]
+fn software_rsa_transport_respects_the_fips_module_boundary() {
+    use riptering::{KeyTransportAlgorithm, OaepConfig};
+
+    riptering::initialize_backend().expect("provider initialization");
+    let algorithm = KeyTransportAlgorithm::RsaOaep(OaepConfig::default());
+    let registry = riptering::capabilities().unwrap();
+    for operation in [
+        Operation::TransportEncrypt(algorithm),
+        Operation::TransportDecrypt(algorithm),
+    ] {
+        assert_eq!(
+            riptering::supports(operation).unwrap(),
+            !cfg!(feature = "fips")
+                && (matches!(operation, Operation::TransportEncrypt(_))
+                    || !cfg!(feature = "rustcrypto")
+                    || cfg!(feature = "legacy-rsa-decryption"))
+        );
+        if let Some(entry) = registry.iter().find(|entry| entry.operation == operation) {
+            assert!(!entry.fips_approved);
+        }
+    }
+    if cfg!(feature = "fips") {
+        // The refusal must happen before parsing/using key material, even for
+        // the otherwise supported SHA-256 OAEP parameter combination.
+        let wrong_key = SoftwareKey::from_symmetric_bytes(KeyAlgorithm::Hmac, b"secret").unwrap();
+        assert_refused(
+            riptering::keytransport::kt_encrypt(algorithm, &wrong_key, b"key", None),
+            Operation::TransportEncrypt(algorithm),
+        );
+        assert_refused(
+            riptering::keytransport::kt_decrypt(algorithm, &wrong_key, b"ciphertext", None),
+            Operation::TransportDecrypt(algorithm),
+        );
+    }
+}
+
+#[cfg(all(feature = "rustcrypto", not(feature = "legacy-rsa-decryption")))]
+#[test]
+fn rustcrypto_rsa_decryption_requires_separate_opt_in_before_key_use() {
+    use riptering::{KeyTransportAlgorithm, OaepConfig};
+
+    riptering::initialize_backend().unwrap();
+    let wrong_key =
+        SoftwareKey::from_symmetric_bytes(KeyAlgorithm::Hmac, b"synthetic key").unwrap();
+    let mut algorithms = vec![
+        KeyTransportAlgorithm::RsaOaep(OaepConfig::default()),
+        KeyTransportAlgorithm::RsaOaep(OaepConfig {
+            digest: HashAlgorithm::Sha1,
+            mgf_digest: HashAlgorithm::Sha256,
+        }),
+    ];
+    #[cfg(feature = "legacy")]
+    algorithms.push(KeyTransportAlgorithm::RsaPkcs1v15);
+    let registry = riptering::capabilities().unwrap();
+    for algorithm in algorithms.drain(..) {
+        let operation = Operation::TransportDecrypt(algorithm);
+        assert!(!riptering::supports(operation).unwrap());
+        assert!(!registry.iter().any(|entry| entry.operation == operation));
+        // Both public access paths share the software implementation; refusal
+        // precedes wrong key-family, empty ciphertext and invalid label errors.
+        for decrypt in [
+            riptering::keytransport::kt_decrypt,
+            riptering::software::keytransport::kt_decrypt,
+        ] {
+            let result = decrypt(algorithm, &wrong_key, &[], Some(&[0xff]));
+            assert!(result
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("legacy-rsa-decryption"));
+            assert_refused(result, operation);
+        }
+    }
+}
+
+#[cfg(feature = "legacy")]
+#[test]
+fn legacy_pkcs1_transport_preserves_encryption_and_obeys_decryption_policy() {
+    use riptering::KeyTransportAlgorithm;
+    use rsa::pkcs8::EncodePrivateKey;
+
+    riptering::initialize_backend().unwrap();
+    let algorithm = KeyTransportAlgorithm::RsaPkcs1v15;
+    let encrypt = Operation::TransportEncrypt(algorithm);
+    let decrypt = Operation::TransportDecrypt(algorithm);
+    let decryption_enabled = !cfg!(feature = "fips")
+        && (cfg!(feature = "aws-lc") || cfg!(feature = "legacy-rsa-decryption"));
+    assert_eq!(
+        riptering::supports(encrypt).unwrap(),
+        !cfg!(feature = "fips")
+    );
+    assert_eq!(riptering::supports(decrypt).unwrap(), decryption_enabled);
+    let registry = riptering::capabilities().unwrap();
+    assert_eq!(
+        registry.iter().any(|entry| entry.operation == decrypt),
+        decryption_enabled
+    );
+    if cfg!(feature = "fips") {
+        let wrong_key =
+            SoftwareKey::from_symmetric_bytes(KeyAlgorithm::Hmac, b"synthetic key").unwrap();
+        assert_refused(
+            riptering::keytransport::kt_encrypt(algorithm, &wrong_key, b"key", None),
+            encrypt,
+        );
+        assert_refused(
+            riptering::keytransport::kt_decrypt(algorithm, &wrong_key, b"", None),
+            decrypt,
+        );
+        return;
+    }
+    let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).unwrap();
+    let key = SoftwareKey::from_pkcs8_der(
+        KeyAlgorithm::Rsa,
+        private.to_pkcs8_der().unwrap().as_bytes(),
+    )
+    .unwrap();
+    let encrypted =
+        riptering::keytransport::kt_encrypt(algorithm, &key, b"synthetic key", None).unwrap();
+    let decrypted = riptering::keytransport::kt_decrypt(algorithm, &key, &encrypted, None);
+    if decryption_enabled {
+        assert_eq!(decrypted.unwrap(), b"synthetic key");
+    } else {
+        assert_refused(decrypted, decrypt);
     }
 }
 
@@ -233,6 +468,33 @@ fn rsa_keys_below_2048_bits_are_refused_when_used() {
 }
 
 #[test]
+fn rsa_odd_modulus_bit_lengths_follow_fips_import_policy() {
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
+
+    riptering::initialize_backend().expect("provider initialization");
+    let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 2049).unwrap();
+    let public_import = SoftwareKey::from_spki_der(
+        KeyAlgorithm::Rsa,
+        private
+            .to_public_key()
+            .to_public_key_der()
+            .unwrap()
+            .as_bytes(),
+    );
+    let private_import = SoftwareKey::from_pkcs8_der(
+        KeyAlgorithm::Rsa,
+        private.to_pkcs8_der().unwrap().as_bytes(),
+    );
+    if cfg!(feature = "fips") {
+        assert_refused(public_import, Operation::KeyImport(KeyAlgorithm::Rsa));
+        assert_refused(private_import, Operation::KeyImport(KeyAlgorithm::Rsa));
+    } else {
+        assert!(public_import.is_ok());
+        assert!(private_import.is_ok());
+    }
+}
+
+#[test]
 fn aes_cbc_rejects_iv_only_input() {
     riptering::initialize_backend().expect("provider initialization");
     for size in [AesKeySize::Aes128, AesKeySize::Aes256] {
@@ -308,14 +570,19 @@ fn kdfs_match_rfc_vectors() {
              cc30c58179ec3e87c14c01d5c1f3434f1d87"
         )
     );
-    let a3 = riptering::kdf::hkdf_derive(&[0x0b; 22], 42, &HkdfParams::default()).unwrap();
-    assert_eq!(
-        a3,
-        decode(
-            "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d\
-             9d201395faa4b61a96c8"
-        )
-    );
+    let a3 = riptering::kdf::hkdf_derive(&[0x0b; 22], 42, &HkdfParams::default());
+    if cfg!(feature = "fips") {
+        // AWS-LC's full HKDF service does not approve empty context info.
+        assert_refused(a3, Operation::Hkdf(HashAlgorithm::Sha256));
+    } else {
+        assert_eq!(
+            a3.unwrap(),
+            decode(
+                "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d\
+                 9d201395faa4b61a96c8"
+            )
+        );
+    }
     assert!(riptering::kdf::hkdf_derive(&[1], 255 * 32 + 1, &HkdfParams::default()).is_err());
 
     // Cross-checked against Python's hashlib.pbkdf2_hmac. The 8-byte salt and
@@ -370,4 +637,151 @@ fn kdfs_match_rfc_vectors() {
     let recommended = Pbkdf2Params::recommended(HashAlgorithm::Sha512, b"salt".to_vec(), 32);
     assert_eq!(recommended.hash, HashAlgorithm::Sha512);
     assert_eq!(recommended.iteration_count, 210_000);
+}
+
+#[test]
+fn hkdf_empty_parameters_follow_provider_approval_policy() {
+    riptering::initialize_backend().expect("provider initialization");
+    for (salt, info) in [
+        (None, None),
+        (None, Some(Vec::new())),
+        (Some(Vec::new()), Some(b"context".to_vec())),
+        (Some(vec![0; 32]), None),
+        (Some(vec![0; 32]), Some(Vec::new())),
+    ] {
+        let output = riptering::kdf::hkdf_derive(
+            b"synthetic-secret",
+            42,
+            &HkdfParams {
+                salt,
+                info,
+                ..HkdfParams::default()
+            },
+        );
+        if cfg!(feature = "fips") {
+            assert_refused(output, Operation::Hkdf(HashAlgorithm::Sha256));
+        } else {
+            assert_eq!(output.unwrap().len(), 42);
+        }
+    }
+
+    // Absent salt becomes hash-length zeros, so both approved forms produce
+    // the same result with nonempty context under every provider.
+    let params = HkdfParams {
+        info: Some(b"context".to_vec()),
+        ..HkdfParams::default()
+    };
+    let without_salt = riptering::kdf::hkdf_derive(b"synthetic-secret", 42, &params).unwrap();
+    let zero_salt = riptering::kdf::hkdf_derive(
+        b"synthetic-secret",
+        42,
+        &HkdfParams {
+            salt: Some(vec![0; 32]),
+            ..params
+        },
+    )
+    .unwrap();
+    assert_eq!(without_salt, zero_salt);
+}
+
+#[test]
+fn portable_kdfs_preserve_partial_final_blocks() {
+    use riptering::kdf::ConcatKdfParams;
+
+    riptering::initialize_backend().expect("provider initialization");
+    // Independently calculated with Python hashlib/hmac. These 65-byte
+    // outputs exercise multiple rounds and a partial final block in the
+    // AWS-LC portable compositions, and the same inputs under RustCrypto.
+    let pbkdf2 = riptering::kdf::pbkdf2_derive(
+        b"PasswordPassword",
+        &Pbkdf2Params {
+            hash: HashAlgorithm::Sha224,
+            salt: b"NaCl1234NaCl1234".to_vec(),
+            iteration_count: 7,
+            key_length: 65,
+        },
+    );
+    let hkdf = riptering::kdf::hkdf_derive(
+        &[0x0b; 22],
+        65,
+        &HkdfParams {
+            hash: HashAlgorithm::Sha224,
+            salt: Some((0u8..16).collect()),
+            info: Some(b"synthetic-info".to_vec()),
+            key_length_bits: 0,
+        },
+    );
+    let concat = riptering::kdf::concat_kdf(
+        b"synthetic-secret",
+        65,
+        &ConcatKdfParams {
+            hash: HashAlgorithm::Sha3_256,
+            algorithm_id: Some(b"algorithm".to_vec()),
+            party_u_info: Some(b"Alice".to_vec()),
+            party_v_info: Some(b"Bob".to_vec()),
+        },
+    );
+    if cfg!(feature = "fips") {
+        assert_refused(pbkdf2, Operation::Pbkdf2(HashAlgorithm::Sha224));
+        assert_refused(hkdf, Operation::Hkdf(HashAlgorithm::Sha224));
+        assert_refused(concat, Operation::ConcatKdf(HashAlgorithm::Sha3_256));
+    } else {
+        assert_eq!(pbkdf2.unwrap(), decode("ebf0ffa9b27ffa4798db3e73f93ffcddf2ec09679a3842e853d566e1538f107776b660d2fae7360823d23e1f57bf10d7ec39703de7059a5f6fcf9bc88de734f77e"));
+        assert_eq!(hkdf.unwrap(), decode("3ca6bb916d24e5cd28540092a45e4607edaa9e1eb6140c001102f4071ee5455992ea2e1bda814c5eb1efb18f5bd421806d9be61aeeb11d450fae42661782bd89c2"));
+        assert_eq!(concat.unwrap(), decode("beee14c349ba559e081ded223cea30fa5b98b448782643d4e6b051caf14a62e662fbd9bde23692815601de93c269b12904f78f7250452073a21a576fed83200aac"));
+    }
+}
+
+#[test]
+fn aes_gcm_framing_authentication_and_empty_messages_match() {
+    use riptering::CipherAlgorithm;
+
+    riptering::initialize_backend().expect("provider initialization");
+    for size in [AesKeySize::Aes128, AesKeySize::Aes192, AesKeySize::Aes256] {
+        let algorithm = CipherAlgorithm::AesGcm(size);
+        let key = vec![0x17; size.key_len()];
+        for length in [0, 1, 16, 4096] {
+            let message = vec![0x42; length];
+            let ciphertext = riptering::cipher::encrypt(algorithm, &key, &message);
+            if cfg!(feature = "fips") && size == AesKeySize::Aes192 {
+                assert_refused(ciphertext, Operation::Encrypt(algorithm));
+                assert_refused(
+                    riptering::cipher::decrypt(algorithm, &key, &[0; 28]),
+                    Operation::Decrypt(algorithm),
+                );
+                continue;
+            }
+            let mut ciphertext = ciphertext.unwrap();
+            assert_eq!(ciphertext.len(), 12 + length + 16);
+            assert_eq!(
+                riptering::cipher::decrypt(algorithm, &key, &ciphertext).unwrap(),
+                message
+            );
+            *ciphertext.last_mut().unwrap() ^= 1;
+            assert!(riptering::cipher::decrypt(algorithm, &key, &ciphertext).is_err());
+            assert!(riptering::cipher::decrypt(algorithm, &key, &ciphertext[..27]).is_err());
+        }
+    }
+}
+
+#[cfg(feature = "legacy")]
+#[test]
+fn pbkdf2_capabilities_reject_unimplemented_legacy_hashes() {
+    riptering::initialize_backend().expect("provider initialization");
+    for hash in [HashAlgorithm::Md5, HashAlgorithm::Ripemd160] {
+        let operation = Operation::Pbkdf2(hash);
+        assert!(!riptering::supports(operation).unwrap());
+        assert_refused(
+            riptering::kdf::pbkdf2_derive(
+                b"synthetic-password",
+                &Pbkdf2Params {
+                    hash,
+                    salt: b"synthetic-salt-16".to_vec(),
+                    iteration_count: 1000,
+                    key_length: 32,
+                },
+            ),
+            operation,
+        );
+    }
 }

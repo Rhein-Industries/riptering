@@ -1,8 +1,9 @@
 name: CI
 
 # Tests every document provider (RustCrypto and AWS-LC), PKCS#11 against
-# SoftHSM2, the Linux-only AWS-LC FIPS build and macOS, on GitHub-hosted
-# runners only.
+# SoftHSM2 and the Linux-only AWS-LC FIPS build. RustCrypto runs on native
+# Linux, macOS and Windows GitHub-hosted runners; non-FIPS AWS-LC also runs
+# on macOS.
 #
 # Publishing to crates.io is manual for now: a Rhein Industries maintainer
 # runs `cargo publish` from a tagged commit after this workflow passes.
@@ -84,16 +85,21 @@ jobs:
         run: |
           cargo clippy --locked --all-targets -- -D warnings
           cargo clippy --locked --all-targets --features post-quantum,legacy -- -D warnings
+          cargo clippy --locked --all-targets --features legacy-rsa-decryption -- -D warnings
+          cargo clippy --locked --all-targets --features legacy,legacy-rsa-decryption -- -D warnings
           cargo clippy --locked --all-targets --no-default-features --features aws-lc,legacy,pkcs11 -- -D warnings
           cargo clippy --locked --all-targets --no-default-features --features aws-lc,pkcs11 -- -D warnings
       - name: RustCrypto provider
         run: |
-          cargo test --locked
-          cargo test --locked --features post-quantum,legacy
+          cargo test --locked --no-fail-fast
+          cargo test --locked --no-fail-fast --features post-quantum,legacy
+          cargo test --locked --no-fail-fast --features legacy-rsa-decryption
+          cargo test --locked --no-fail-fast --features legacy,legacy-rsa-decryption
       - name: AWS-LC provider
         run: |
-          cargo test --locked --no-default-features --features aws-lc
-          cargo test --locked --no-default-features --features aws-lc,legacy
+          cargo test --locked --no-fail-fast --no-default-features --features aws-lc
+          cargo test --locked --no-fail-fast --no-default-features --features aws-lc,legacy
+          cargo test --locked --no-fail-fast --no-default-features --features aws-lc,legacy,legacy-rsa-decryption
       - name: TLS client configuration
         run: |
           cargo test --locked --no-default-features --features rustcrypto,tls-ring --test tls_provider
@@ -148,6 +154,7 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
         run: |
           cargo doc --locked --no-deps
+          cargo doc --locked --no-deps --features legacy-rsa-decryption
           cargo doc --locked --no-deps --no-default-features --features rustcrypto,legacy,post-quantum,pkcs11,tls-ring
           cargo doc --locked --no-deps --no-default-features --features aws-lc,legacy,pkcs11,tls-aws-lc
 
@@ -192,9 +199,17 @@ jobs:
           fi
 
   macos:
-    name: macOS (default and non-FIPS AWS-LC)
+    name: macOS providers (Rust ${{ matrix.toolchain }})
     runs-on: macos-15
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: "1.88.0"
+            lint: true
+          - toolchain: stable
+            lint: false
     defaults:
       run:
         shell: bash
@@ -204,18 +219,78 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
-          toolchain: ${{ env.MSRV }}
+          toolchain: ${{ matrix.toolchain }}
           components: clippy
       - name: Clippy
+        if: matrix.lint
         run: |
           cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --features post-quantum,legacy -- -D warnings
+          cargo clippy --locked --all-targets --features legacy-rsa-decryption -- -D warnings
+          cargo clippy --locked --all-targets --features legacy,legacy-rsa-decryption -- -D warnings
           cargo clippy --locked --all-targets --no-default-features --features aws-lc,legacy,pkcs11 -- -D warnings
       - name: RustCrypto provider
         run: |
-          cargo test --locked
-          cargo test --locked --features post-quantum,legacy
+          cargo test --locked --no-fail-fast
+          cargo test --locked --no-fail-fast --features post-quantum,legacy
+          cargo test --locked --no-fail-fast --features legacy-rsa-decryption
+          cargo test --locked --no-fail-fast --features legacy,legacy-rsa-decryption
+          cargo test --locked --no-default-features --features rustcrypto,tls-ring --test tls_provider
       - name: AWS-LC provider (non-FIPS)
         run: |
-          cargo test --locked --no-default-features --features aws-lc
-          cargo test --locked --no-default-features --features aws-lc,legacy
+          cargo test --locked --no-fail-fast --no-default-features --features aws-lc
+          cargo test --locked --no-fail-fast --no-default-features --features aws-lc,legacy
+          cargo test --locked --no-fail-fast --no-default-features --features aws-lc,legacy,legacy-rsa-decryption
           cargo test --locked --no-default-features --features aws-lc,tls-aws-lc --test tls_provider
+      - name: API documentation
+        if: matrix.lint
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: |
+          cargo doc --locked --no-deps
+          cargo doc --locked --no-deps --features legacy-rsa-decryption
+
+  windows:
+    name: Windows RustCrypto (Rust ${{ matrix.toolchain }})
+    runs-on: windows-2025
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: "1.88.0"
+            lint: true
+          - toolchain: stable
+            lint: false
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      - name: Clippy
+        if: matrix.lint
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --features post-quantum,legacy -- -D warnings
+          cargo clippy --locked --all-targets --features legacy-rsa-decryption -- -D warnings
+          cargo clippy --locked --all-targets --features legacy,legacy-rsa-decryption -- -D warnings
+      - name: RustCrypto unit, integration and documentation tests
+        run: |
+          cargo test --locked --no-fail-fast
+          cargo test --locked --no-fail-fast --features post-quantum,legacy
+          cargo test --locked --no-fail-fast --features legacy-rsa-decryption
+          cargo test --locked --no-fail-fast --features legacy,legacy-rsa-decryption
+          cargo test --locked --no-default-features --features rustcrypto,tls-ring --test tls_provider
+      - name: API documentation
+        if: matrix.lint
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: |
+          cargo doc --locked --no-deps
+          cargo doc --locked --no-deps --features legacy-rsa-decryption

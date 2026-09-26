@@ -60,10 +60,10 @@ pub mod aes_cbc {
             .map_err(|_| Error::Crypto("invalid AES-CBC IV".into()))?;
         let key = EncryptingKey::cbc(aws_key(key)?)
             .map_err(|_| Error::Crypto("AWS-LC AES-CBC setup failed".into()))?;
-        let mut output = xmlenc_pad(plaintext, 16);
+        let mut output = zeroize::Zeroizing::new(xmlenc_pad(plaintext, 16));
         key.less_safe_encrypt(&mut output, EncryptionContext::Iv128(FixedLength::from(iv)))
             .map_err(|_| Error::Crypto("AWS-LC AES-CBC encryption failed".into()))?;
-        Ok(output)
+        Ok(std::mem::take(&mut *output))
     }
 
     fn aws_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
@@ -74,7 +74,7 @@ pub mod aes_cbc {
             .map_err(|_| Error::Crypto("invalid AES-CBC IV".into()))?;
         let key = DecryptingKey::cbc(aws_key(key)?)
             .map_err(|_| Error::Crypto("AWS-LC AES-CBC setup failed".into()))?;
-        let mut output = ciphertext.to_vec();
+        let mut output = zeroize::Zeroizing::new(ciphertext.to_vec());
         let plaintext = key
             .decrypt(&mut output, DecryptionContext::Iv128(FixedLength::from(iv)))
             .map_err(|_| Error::Crypto("AWS-LC AES-CBC decryption failed".into()))?;

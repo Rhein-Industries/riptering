@@ -256,7 +256,7 @@ pub fn capabilities() -> Result<Vec<Capability>> {
         .filter(|operation| provider_supports(*operation))
         .map(|operation| Capability {
             operation,
-            fips_approved: operation_is_fips_approved(operation),
+            fips_approved: software_operation_is_fips_approved(operation),
         })
         .collect())
 }
@@ -464,9 +464,16 @@ fn known_hashes() -> Vec<HashAlgorithm> {
     hashes
 }
 
+#[cfg(all(feature = "rustcrypto", not(feature = "legacy-rsa-decryption")))]
+pub(crate) const RSA_DECRYPTION_DISABLED: &str = "RustCrypto RSA decryption is disabled because RUSTSEC-2023-0071 remains unpatched; explicit legacy-rsa-decryption opt-in is required";
+
 /// Enforce initialization and reject unsupported operations before key use.
 pub(crate) fn require_supported(operation: Operation) -> Result<()> {
     ensure_backend()?;
+    #[cfg(all(feature = "rustcrypto", not(feature = "legacy-rsa-decryption")))]
+    if matches!(operation, Operation::TransportDecrypt(_)) {
+        return Err(Error::unsupported(operation, RSA_DECRYPTION_DISABLED));
+    }
     if provider_supports(operation) {
         Ok(())
     } else {
@@ -478,7 +485,21 @@ fn provider_supports(operation: Operation) -> bool {
     use compile_time_provider::Provider as _;
 
     let implemented = compile_time_provider::SelectedProvider::supports(operation);
-    implemented && (!cfg!(feature = "fips") || operation_is_fips_approved(operation))
+    implemented && (!cfg!(feature = "fips") || software_operation_is_fips_approved(operation))
+}
+
+fn software_operation_is_fips_approved(operation: Operation) -> bool {
+    match operation {
+        // The pinned AWS-LC FIPS module contains RSA signing/verification, but
+        // RSA encryption/decryption and OAEP padding are outside its boundary.
+        Operation::TransportEncrypt(_) | Operation::TransportDecrypt(_) => false,
+        // The module's GCM service indicator approves only 128/256-bit keys.
+        Operation::Encrypt(CipherAlgorithm::AesGcm(crate::algorithm::AesKeySize::Aes192))
+        | Operation::Decrypt(CipherAlgorithm::AesGcm(crate::algorithm::AesKeySize::Aes192)) => {
+            false
+        }
+        _ => operation_is_fips_approved(operation),
+    }
 }
 
 fn operation_is_fips_approved(operation: Operation) -> bool {
@@ -520,8 +541,8 @@ fn operation_is_fips_approved(operation: Operation) -> bool {
         // SP 800-132 password-based derivation method.
         Operation::Pkcs12Kdf(_) => false,
         Operation::Sign(algorithm) | Operation::Verify(algorithm) => approved_signature(algorithm),
-        // AES-192-GCM sealing uses a nonce generated outside the module
-        // (AWS-LC has no randomized-nonce AES-192 key), so it is not approved.
+        // Retain the existing conservative PKCS#11 policy for AES-192-GCM
+        // sealing. Software module restrictions are checked separately above.
         Operation::Encrypt(CipherAlgorithm::AesGcm(crate::algorithm::AesKeySize::Aes192)) => false,
         Operation::Encrypt(CipherAlgorithm::AesCbc(_))
         | Operation::Decrypt(CipherAlgorithm::AesCbc(_))
@@ -540,6 +561,35 @@ fn operation_is_fips_approved(operation: Operation) -> bool {
 
 #[cfg(feature = "rustcrypto")]
 fn rustcrypto_supports(operation: Operation) -> bool {
+    // Encryption and signatures remain supported. Enabling legacy algorithms
+    // does not silently enable affected private-key decryption operations.
+    #[cfg(not(feature = "legacy-rsa-decryption"))]
+    if matches!(operation, Operation::TransportDecrypt(_)) {
+        return false;
+    }
+    if let Operation::TransportEncrypt(KeyTransportAlgorithm::RsaOaep(config))
+    | Operation::TransportDecrypt(KeyTransportAlgorithm::RsaOaep(config)) = operation
+    {
+        // Match both OAEP dispatchers: the primary digest additionally accepts
+        // MD5/RIPEMD-160 with `legacy`, but MGF1 only accepts SHA-1/SHA-2.
+        // Reject capability gaps before the caller's key is inspected.
+        let sha1_or_sha2 = |hash| {
+            matches!(
+                hash,
+                HashAlgorithm::Sha1
+                    | HashAlgorithm::Sha224
+                    | HashAlgorithm::Sha256
+                    | HashAlgorithm::Sha384
+                    | HashAlgorithm::Sha512
+            )
+        };
+        #[cfg(feature = "legacy")]
+        let supported_digest = sha1_or_sha2(config.digest)
+            || matches!(config.digest, HashAlgorithm::Md5 | HashAlgorithm::Ripemd160);
+        #[cfg(not(feature = "legacy"))]
+        let supported_digest = sha1_or_sha2(config.digest);
+        return supported_digest && sha1_or_sha2(config.mgf_digest);
+    }
     let is_legacy_key = matches!(
         operation,
         Operation::KeyImport(KeyAlgorithm::Dsa)
@@ -554,6 +604,12 @@ fn rustcrypto_supports(operation: Operation) -> bool {
             | Operation::Pbkdf2(HashAlgorithm::Sha3_384)
             | Operation::Pbkdf2(HashAlgorithm::Sha3_512)
     );
+    #[cfg(feature = "legacy")]
+    let is_unsupported_pbkdf2 = is_unsupported_pbkdf2
+        || matches!(
+            operation,
+            Operation::Pbkdf2(HashAlgorithm::Md5) | Operation::Pbkdf2(HashAlgorithm::Ripemd160)
+        );
     let is_unsupported_pkcs12 = matches!(operation, Operation::Pkcs12Kdf(hash) if !matches!(hash, HashAlgorithm::Sha1 | HashAlgorithm::Sha256));
     (!is_legacy_key || cfg!(feature = "legacy")) && !is_unsupported_pbkdf2 && !is_unsupported_pkcs12
 }
@@ -923,12 +979,15 @@ mod tests {
         assert!(capabilities.iter().any(|capability| {
             capability.operation == Operation::Digest(HashAlgorithm::Sha256)
         }));
-        assert!(capabilities.iter().any(|capability| {
-            capability.operation
-                == Operation::TransportEncrypt(KeyTransportAlgorithm::RsaOaep(
-                    crate::algorithm::OaepConfig::default(),
-                ))
-        }));
+        let transport = Operation::TransportEncrypt(KeyTransportAlgorithm::RsaOaep(
+            crate::algorithm::OaepConfig::default(),
+        ));
+        assert_eq!(
+            capabilities
+                .iter()
+                .any(|capability| capability.operation == transport),
+            !cfg!(feature = "fips"),
+        );
     }
 
     #[test]
@@ -955,6 +1014,31 @@ mod tests {
         assert!(!operation_is_fips_approved(Operation::Pkcs12Kdf(
             HashAlgorithm::Sha256
         )));
+    }
+
+    #[test]
+    fn fips_policy_rejects_aes_192_gcm_in_both_directions() {
+        let algorithm = CipherAlgorithm::AesGcm(crate::algorithm::AesKeySize::Aes192);
+        assert!(!software_operation_is_fips_approved(Operation::Encrypt(
+            algorithm
+        )));
+        assert!(!software_operation_is_fips_approved(Operation::Decrypt(
+            algorithm
+        )));
+        // The software module restriction does not narrow token approval policy.
+        assert!(operation_is_fips_approved(Operation::Decrypt(algorithm)));
+    }
+
+    #[test]
+    fn software_fips_transport_boundary_preserves_hsm_algorithm_policy() {
+        let algorithm = KeyTransportAlgorithm::RsaOaep(crate::algorithm::OaepConfig::default());
+        for operation in [
+            Operation::TransportEncrypt(algorithm),
+            Operation::TransportDecrypt(algorithm),
+        ] {
+            assert!(operation_is_fips_approved(operation));
+            assert!(!software_operation_is_fips_approved(operation));
+        }
     }
 
     #[test]

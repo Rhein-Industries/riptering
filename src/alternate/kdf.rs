@@ -5,6 +5,7 @@ use crate::algorithm::HashAlgorithm;
 use crate::backend::{require_supported, Operation};
 use crate::digest;
 use crate::error::{Error, Result};
+use zeroize::Zeroizing;
 
 pub const PBKDF2_MIN_SALT_LEN: usize = 8;
 pub const PBKDF2_MIN_ITERATIONS: u32 = 1;
@@ -64,6 +65,10 @@ impl Pbkdf2Params {
     }
 }
 
+/// RFC 5869 HKDF parameters.
+///
+/// FIPS builds require nonempty `info` and reject an explicitly empty salt.
+/// `salt: None` uses the RFC 5869 hash-length zero salt inside the module.
 #[derive(Debug, Clone)]
 pub struct HkdfParams {
     pub hash: HashAlgorithm,
@@ -106,24 +111,27 @@ pub fn concat_kdf(
     // ConcatKDF is the SP 800-56C one-step KDF with a digest auxiliary
     // function; use AWS-LC's module implementation where it exists.
     if let Some(algorithm) = sskdf_digest_algorithm(params.hash) {
-        let mut output = vec![0u8; key_len];
+        let mut output = Zeroizing::new(vec![0u8; key_len]);
         aws_lc_rs::kdf::sskdf_digest(algorithm, shared_secret, &other_info, &mut output)
             .map_err(|_| Error::Crypto("AWS-LC ConcatKDF derivation failed".into()))?;
-        return Ok(output);
+        return Ok(std::mem::take(&mut *output));
     }
     let hash_len = hash_len(params.hash)?;
-    let mut output = Vec::with_capacity(key_len);
+    let mut output = Zeroizing::new(Vec::with_capacity(key_len));
     for counter in 1..=key_len.div_ceil(hash_len) {
         let counter = u32::try_from(counter)
             .map_err(|_| Error::Crypto("ConcatKDF counter overflow".into()))?;
-        let mut input = Vec::with_capacity(4 + shared_secret.len() + other_info.len());
+        let mut input = Zeroizing::new(Vec::with_capacity(
+            4 + shared_secret.len() + other_info.len(),
+        ));
         input.extend_from_slice(&counter.to_be_bytes());
         input.extend_from_slice(shared_secret);
         input.extend_from_slice(&other_info);
-        output.extend_from_slice(&digest::digest(params.hash, &input)?);
+        let block = Zeroizing::new(digest::digest(params.hash, &input)?);
+        let remaining = key_len - output.len();
+        output.extend_from_slice(&block[..remaining.min(block.len())]);
     }
-    output.truncate(key_len);
-    Ok(output)
+    Ok(std::mem::take(&mut *output))
 }
 
 pub fn pbkdf2_derive(password: &[u8], params: &Pbkdf2Params) -> Result<Vec<u8>> {
@@ -156,28 +164,42 @@ pub fn pbkdf2_derive(password: &[u8], params: &Pbkdf2Params) -> Result<Vec<u8>> 
     }
     let h_len = hash_len(params.hash)?;
     let blocks = params.key_length.div_ceil(h_len);
-    let mut output = Vec::with_capacity(blocks * h_len);
+    let mut output = Zeroizing::new(Vec::with_capacity(params.key_length));
     for block in 1..=blocks {
         let block = u32::try_from(block)
             .map_err(|_| Error::Crypto("PBKDF2 block counter overflow".into()))?;
         let mut first_input = params.salt.clone();
         first_input.extend_from_slice(&block.to_be_bytes());
-        let mut u = digest::compute_hmac(params.hash, password, &first_input)?;
+        let mut u = Zeroizing::new(digest::compute_hmac(params.hash, password, &first_input)?);
         let mut accumulator = u.clone();
         for _ in 1..params.iteration_count {
-            u = digest::compute_hmac(params.hash, password, &u)?;
-            for (left, right) in accumulator.iter_mut().zip(&u) {
+            u = Zeroizing::new(digest::compute_hmac(params.hash, password, &u)?);
+            for (left, right) in accumulator.iter_mut().zip(u.iter()) {
                 *left ^= right;
             }
         }
-        output.extend_from_slice(&accumulator);
+        let remaining = params.key_length - output.len();
+        output.extend_from_slice(&accumulator[..remaining.min(accumulator.len())]);
     }
-    output.truncate(params.key_length);
-    Ok(output)
+    Ok(std::mem::take(&mut *output))
+}
+
+fn hkdf_has_fips_approved_parameters(params: &HkdfParams) -> bool {
+    // Match the pinned AWS-LC module's HKDF service indicator. The wrapper
+    // replaces an absent salt with hash-length zeros, but explicitly empty
+    // salts and empty context information are non-approved configurations.
+    params.salt.as_ref().is_none_or(|salt| !salt.is_empty())
+        && params.info.as_ref().is_some_and(|info| !info.is_empty())
 }
 
 pub fn hkdf_derive(shared_secret: &[u8], key_len: usize, params: &HkdfParams) -> Result<Vec<u8>> {
     require_supported(Operation::Hkdf(params.hash))?;
+    if cfg!(feature = "fips") && !hkdf_has_fips_approved_parameters(params) {
+        return Err(Error::unsupported(
+            Operation::Hkdf(params.hash),
+            "FIPS HKDF requires nonempty info and forbids an explicitly empty salt",
+        ));
+    }
     let output_len = if params.key_length_bits > 0 {
         if !params.key_length_bits.is_multiple_of(8) {
             return Err(Error::Crypto(
@@ -203,26 +225,29 @@ pub fn hkdf_derive(shared_secret: &[u8], key_len: usize, params: &HkdfParams) ->
             }
         }
         let info = [info];
-        let mut output = vec![0u8; output_len];
+        let mut output = Zeroizing::new(vec![0u8; output_len]);
         aws_lc_rs::hkdf::Salt::new(algorithm, salt)
             .extract(shared_secret)
             .expand(&info, OutputLen(output_len))
             .and_then(|okm| okm.fill(&mut output))
             .map_err(|_| Error::Crypto("AWS-LC HKDF derivation failed".into()))?;
-        return Ok(output);
+        return Ok(std::mem::take(&mut *output));
     }
-    let prk = digest::compute_hmac(params.hash, salt, shared_secret)?;
-    let mut output = Vec::with_capacity(output_len);
-    let mut previous = Vec::new();
+    let prk = Zeroizing::new(digest::compute_hmac(params.hash, salt, shared_secret)?);
+    let mut output = Zeroizing::new(Vec::with_capacity(output_len));
+    let mut previous = Zeroizing::new(Vec::new());
     for counter in 1..=output_len.div_ceil(h_len) {
-        let mut input = previous;
+        // Allocate the complete input before copying secret bytes, so a
+        // Vec growth cannot leave the previous block in a freed allocation.
+        let mut input = Zeroizing::new(Vec::with_capacity(h_len + info.len() + 1));
+        input.extend_from_slice(&previous);
         input.extend_from_slice(info);
         input.push(counter as u8);
-        previous = digest::compute_hmac(params.hash, &prk, &input)?;
-        output.extend_from_slice(&previous);
+        previous = Zeroizing::new(digest::compute_hmac(params.hash, &prk, &input)?);
+        let remaining = output_len - output.len();
+        output.extend_from_slice(&previous[..remaining.min(previous.len())]);
     }
-    output.truncate(output_len);
-    Ok(output)
+    Ok(std::mem::take(&mut *output))
 }
 
 // The AWS-LC module implements these KDFs only for the digests below. Other
@@ -271,6 +296,25 @@ fn hash_len(hash: HashAlgorithm) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hkdf_parameter_policy_matches_module_approval_requirements() {
+        for salt in [None, Some(Vec::new()), Some(vec![0; 32])] {
+            for info in [None, Some(Vec::new()), Some(b"context".to_vec())] {
+                // Only the absent/zero-filled salts with nonempty context
+                // satisfy the module's documented HKDF approval conditions.
+                let expected = salt != Some(Vec::new()) && info == Some(b"context".to_vec());
+                assert_eq!(
+                    hkdf_has_fips_approved_parameters(&HkdfParams {
+                        salt: salt.clone(),
+                        info: info.clone(),
+                        ..HkdfParams::default()
+                    }),
+                    expected,
+                );
+            }
+        }
+    }
 
     #[test]
     fn hkdf_rfc5869_case_1() {

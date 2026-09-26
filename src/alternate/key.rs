@@ -106,11 +106,23 @@ impl SoftwareKey {
         })))
     }
 
+    /// Import raw X25519 components, checking private/public correspondence.
     pub fn from_x25519(private: Option<&[u8]>, public: &[u8]) -> Result<Self> {
         let algorithm = KeyAlgorithm::X25519;
         require_supported(Operation::KeyImport(algorithm))?;
         if public.len() != 32 || private.is_some_and(|value| value.len() != 32) {
             return Err(Error::Key("X25519 keys must be 32 bytes".into()));
+        }
+        if let Some(private) = private {
+            use aws_lc_rs::agreement::{PrivateKey, X25519};
+            let private = PrivateKey::from_private_key(&X25519, private)
+                .map_err(|e| Error::Key(format!("AWS-LC X25519 private import failed: {e}")))?;
+            let derived = private
+                .compute_public_key()
+                .map_err(|e| Error::Key(format!("AWS-LC X25519 public derivation failed: {e}")))?;
+            if !crate::digest::constant_time_eq(derived.as_ref(), public) {
+                return Err(Error::Key("X25519 private/public key mismatch".into()));
+            }
         }
         Ok(Self(Arc::new(KeyMaterial {
             algorithm,
@@ -228,10 +240,22 @@ fn enforce_key_strength(algorithm: KeyAlgorithm, public_der: &[u8]) -> Result<()
     }
     let bits = rsa_spki_modulus_bits(public_der)
         .ok_or_else(|| Error::Key("RSA key is not a valid SubjectPublicKeyInfo".into()))?;
+    validate_fips_rsa_modulus_bits(bits)
+}
+
+fn validate_fips_rsa_modulus_bits(bits: usize) -> Result<()> {
     if bits < 2048 {
         return Err(Error::unsupported(
-            Operation::KeyImport(algorithm),
+            Operation::KeyImport(KeyAlgorithm::Rsa),
             format!("{bits}-bit RSA key (riptering requires at least 2048 bits)"),
+        ));
+    }
+    // Match the pinned module's RSA signature service indicator: an approved
+    // modulus has at least 2048 bits and an even bit length.
+    if !bits.is_multiple_of(2) {
+        return Err(Error::unsupported(
+            Operation::KeyImport(KeyAlgorithm::Rsa),
+            format!("{bits}-bit RSA key (FIPS requires an even modulus bit length)"),
         ));
     }
     Ok(())
@@ -364,6 +388,16 @@ fn public_from_private(algorithm: KeyAlgorithm, private_der: &[u8]) -> Result<Ve
 #[cfg(all(test, not(feature = "fips")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rsa_modulus_bit_policy_matches_fips_service_indicator() {
+        for bits in [1024, 2047, 2049, 3073, 8193] {
+            assert!(validate_fips_rsa_modulus_bits(bits).is_err(), "{bits}");
+        }
+        for bits in [2048, 3072, 4096, 8192] {
+            assert!(validate_fips_rsa_modulus_bits(bits).is_ok(), "{bits}");
+        }
+    }
 
     #[test]
     fn imports_neutral_dh_parameters_without_exposing_private_exponent() {

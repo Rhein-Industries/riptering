@@ -31,13 +31,18 @@
 //! the same modulus therefore runs for the same number of iterations
 //! regardless of the caller's private-key magnitude.
 //!
-//! Heap allocation and windowed-table cache timing are **not** mitigated.
-//! A remote network attacker without sub-microsecond timing precision
-//! will not recover key material; a co-located attacker (shared SMT
-//! core, shared L1 cache, hypervisor-level observation) may still extract
-//! bits. If that threat model applies, do DH on a hardware HSM.
+//! This does not establish end-to-end constant-time behavior, including
+//! heap allocation or cache effects. No timing-resistance threshold has
+//! been measured for this implementation. Where side-channel resistance
+//! is required, use a provider assessed for the deployment's threat model.
 //!
 //! ## Parameter and subgroup validation
+//!
+//! Callers must use independently validated prime `p` and prime subgroup
+//! order `q`, with strength appropriate to their protocol. This function
+//! checks structural relationships and peer membership; it does not test
+//! primality or impose a minimum group size. Untrusted group parameters
+//! cannot establish the subgroup guarantees described below.
 //!
 //! [`compute`] first checks the group parameters: `1 < q < p` and
 //! `q` divides `p - 1`. The private exponent must lie in `[1, q-1]`
@@ -45,9 +50,9 @@
 //! peer's public key `y`:
 //!
 //! 1. `1 < y < p` — rejects the identity / trivial points.
-//! 2. `y^q mod p == 1` — confirms `y` is in the subgroup of order `q`.
-//!    Prevents small-subgroup attacks where an attacker supplies a `y`
-//!    in a short-order subgroup to leak bits of the private key.
+//! 2. `y^q mod p == 1` — with validated prime parameters, confirms `y`
+//!    is in the subgroup of order `q`. Together with the range check,
+//!    this excludes peer values in a smaller subgroup.
 //!
 //! Leading zero bytes on the public inputs (`y`, `q`) are ignored, so a
 //! DER-style `y` with a single `0x00` sign byte is accepted.
@@ -67,6 +72,8 @@ use zeroize::Zeroize;
 /// All values are big-endian byte slices. The output is zero-padded
 /// on the left to `p.len()` bytes. `q` (the subgroup order) is
 /// required for subgroup validation; passing `None` returns an error.
+/// The caller must independently validate the primes `p` and `q` and their
+/// cryptographic strength; this function does not validate primality or size.
 pub fn compute(
     other_public: &[u8],
     my_private: &[u8],

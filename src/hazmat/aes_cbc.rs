@@ -33,6 +33,7 @@ use crate::algorithm::AesKeySize;
 use crate::backend::{require_supported, Operation};
 use crate::error::{Error, Result};
 use crate::software::cipher::{pkcs7_pad, xmlenc_unpad};
+use zeroize::Zeroizing;
 
 /// Encrypt `plaintext` under `key` using AES-CBC with PKCS#7 padding.
 ///
@@ -55,7 +56,7 @@ pub fn encrypt(size: AesKeySize, key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>
     let mut iv = [0u8; 16];
     crate::backend::fill_random(&mut iv)?;
 
-    let mut buf = pkcs7_pad(plaintext, 16);
+    let mut buf = Zeroizing::new(pkcs7_pad(plaintext, 16));
     let buf_len = buf.len();
 
     macro_rules! do_encrypt {
@@ -110,7 +111,7 @@ pub fn decrypt(size: AesKeySize, key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
 
     let iv = &data[..16];
     let ciphertext = &data[16..];
-    let mut buf = ciphertext.to_vec();
+    let mut buf = Zeroizing::new(ciphertext.to_vec());
 
     macro_rules! do_decrypt {
         ($aes:ty) => {{

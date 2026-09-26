@@ -1,0 +1,33 @@
+   Compiling riptering v0.6.2 (/Users/dominik/orchaspub/riptering)
+    Finished `release` profile [optimized] target(s) in 5.74s
+     Running unittests src/lib.rs (target/release/deps/riptering-a8d727c1f2a18965)
+
+running 2 tests
+test pkcs11::tests::mock_session_contention_measurement ... mock_session_contention sample=1 shared_session=true workers=4 operations=256 token_latency_ms=1 elapsed_ms=322.968
+mock_session_contention sample=1 shared_session=false workers=4 operations=256 token_latency_ms=1 elapsed_ms=80.203
+mock_session_contention sample=2 shared_session=true workers=4 operations=256 token_latency_ms=1 elapsed_ms=321.296
+mock_session_contention sample=2 shared_session=false workers=4 operations=256 token_latency_ms=1 elapsed_ms=79.935
+mock_session_contention sample=3 shared_session=true workers=4 operations=256 token_latency_ms=1 elapsed_ms=320.930
+mock_session_contention sample=3 shared_session=false workers=4 operations=256 token_latency_ms=1 elapsed_ms=79.792
+ok
+test pkcs11::tests::signature_message_preparation_measurement ... pkcs11_message_preparation sample=1 baseline_copy=true bytes=64 iterations=100000 ns_per_operation=21.296
+pkcs11_message_preparation sample=1 baseline_copy=false bytes=64 iterations=100000 ns_per_operation=0.800
+pkcs11_message_preparation sample=2 baseline_copy=false bytes=64 iterations=100000 ns_per_operation=0.799
+pkcs11_message_preparation sample=2 baseline_copy=true bytes=64 iterations=100000 ns_per_operation=21.272
+pkcs11_message_preparation sample=3 baseline_copy=true bytes=64 iterations=100000 ns_per_operation=20.690
+pkcs11_message_preparation sample=3 baseline_copy=false bytes=64 iterations=100000 ns_per_operation=0.784
+pkcs11_message_preparation sample=1 baseline_copy=true bytes=4096 iterations=50000 ns_per_operation=60.551
+pkcs11_message_preparation sample=1 baseline_copy=false bytes=4096 iterations=50000 ns_per_operation=0.751
+pkcs11_message_preparation sample=2 baseline_copy=false bytes=4096 iterations=50000 ns_per_operation=0.752
+pkcs11_message_preparation sample=2 baseline_copy=true bytes=4096 iterations=50000 ns_per_operation=57.705
+pkcs11_message_preparation sample=3 baseline_copy=true bytes=4096 iterations=50000 ns_per_operation=57.374
+pkcs11_message_preparation sample=3 baseline_copy=false bytes=4096 iterations=50000 ns_per_operation=0.743
+pkcs11_message_preparation sample=1 baseline_copy=true bytes=1048576 iterations=500 ns_per_operation=13092.916
+pkcs11_message_preparation sample=1 baseline_copy=false bytes=1048576 iterations=500 ns_per_operation=0.916
+pkcs11_message_preparation sample=2 baseline_copy=false bytes=1048576 iterations=500 ns_per_operation=0.832
+pkcs11_message_preparation sample=2 baseline_copy=true bytes=1048576 iterations=500 ns_per_operation=12968.084
+pkcs11_message_preparation sample=3 baseline_copy=true bytes=1048576 iterations=500 ns_per_operation=13134.582
+pkcs11_message_preparation sample=3 baseline_copy=false bytes=1048576 iterations=500 ns_per_operation=0.918
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 1.24s
